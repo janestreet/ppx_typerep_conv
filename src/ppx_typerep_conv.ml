@@ -183,7 +183,6 @@ module Typerep_signature = struct
   let sig_generator ~loc:_ ~path:_ (_rec_flag, tds) =
     List.map tds ~f:sig_of_one_def
     |> List.flatten
-    |> Type_conv.Generator_result.make_just_after
 
   let gen = Type_conv.Generator.make Type_conv.Args.empty sig_generator
 end
@@ -684,8 +683,7 @@ module Typerep_implementation = struct
       List.split (List.map_right_to_left tds
                     ~f:(impl_of_one_def ~loc ~path))
     in
-    Type_conv.Generator_result.make_just_after
-      (List.flatten prelude @ [ pstr_value ~loc rec_flag bindings ])
+    List.flatten prelude @ [ pstr_value ~loc rec_flag bindings ]
 
   let with_typerep_abstract ~loc:_ ~path (_rec_flag, tds) =
     List.map tds ~f:(fun td ->
@@ -694,7 +692,6 @@ module Typerep_implementation = struct
       let params = td.ptype_params in
       let params_names = Util.params_names ~params in
       Util.typerep_abstract ~loc ~path ~type_name ~params_names)
-    |> Type_conv.Generator_result.make_just_after
 
   let gen =
     Type_conv.Generator.make
