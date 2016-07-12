@@ -134,7 +134,7 @@ module Branches = struct
       let label = cd.pcd_name.txt in
       let loc = cd.pcd_loc in
       match cd.pcd_args with
-      | [] ->
+      | Pcstr_tuple [] ->
         { label;
           ctyp = None;
           poly = false;
@@ -142,7 +142,7 @@ module Branches = struct
           index;
           arity_index = no_arg ();
         }
-      | args ->
+      | Pcstr_tuple args ->
         let arity = List.length args in
         let ctyp = ptyp_tuple ~loc args in
         { label;
@@ -152,6 +152,8 @@ module Branches = struct
           index;
           arity_index = with_arg ();
         }
+      | Pcstr_record _ ->
+        failwith "Pcstr_record not supported"
     in
     List.mapi cds ~f:mapi
 end
@@ -263,7 +265,7 @@ module Typerep_implementation = struct
         [%stri let name = [%e estring ~loc full_type_name] ]
       in
       pmod_structure ~loc
-        [ pstr_type ~loc [td]
+        [ pstr_type ~loc Nonrecursive [td]
         ; name_def
         ]
 
