@@ -57,6 +57,7 @@ module Variant_case = struct
   type t =
     { label       : string
     ; ctyp        : core_type option
+    ; args_labels : string list
     ; poly        : bool
     ; arity       : int
     ; index       : int
@@ -103,20 +104,22 @@ module Branches = struct
       let mapi index rf : Variant_case.t =
         match rf with
         | Rtag (label, _, true, _) | Rtag (label, _, _, []) ->
-          { label;
-            ctyp = None;
-            poly = true;
-            arity = 0;
-            index;
-            arity_index = no_arg ();
+          { label
+          ; ctyp = None
+          ; args_labels = []
+          ; poly = true
+          ; arity = 0
+          ; index
+          ; arity_index = no_arg ()
           }
         | Rtag (label, _, false, ctyp :: _) ->
-          { label;
-            ctyp = Some ctyp;
-            poly = true;
-            arity = 1;
-            index;
-            arity_index = with_arg ();
+          { label
+          ; ctyp = Some ctyp
+          ; args_labels = []
+          ; poly = true
+          ; arity = 1
+          ; index
+          ; arity_index = with_arg ()
           }
         | Rinherit ty ->
           Location.raise_errorf ~loc:ty.ptyp_loc
@@ -135,25 +138,38 @@ module Branches = struct
       let loc = cd.pcd_loc in
       match cd.pcd_args with
       | Pcstr_tuple [] ->
-        { label;
-          ctyp = None;
-          poly = false;
-          arity = 0;
-          index;
-          arity_index = no_arg ();
+        { label
+        ; ctyp = None
+        ; args_labels = []
+        ; poly = false
+        ; arity = 0
+        ; index
+        ; arity_index = no_arg ()
         }
       | Pcstr_tuple args ->
         let arity = List.length args in
         let ctyp = ptyp_tuple ~loc args in
-        { label;
-          ctyp = Some ctyp;
-          poly = false;
-          arity;
-          index;
-          arity_index = with_arg ();
+        { label
+        ; ctyp = Some ctyp
+        ; args_labels = []
+        ; poly = false
+        ; arity
+        ; index
+        ; arity_index = with_arg ()
         }
-      | Pcstr_record _ ->
-        failwith "Pcstr_record not supported"
+      | Pcstr_record labels ->
+        let args = List.map labels ~f:(fun { pld_type; _ } -> pld_type) in
+        let args_labels = List.map labels ~f:(fun { pld_name; _} -> pld_name.txt) in
+        let arity = List.length args in
+        let ctyp = ptyp_tuple ~loc args in
+        { label
+        ; ctyp = Some ctyp
+        ; args_labels
+        ; poly = false
+        ; arity
+        ; index
+        ; arity_index = with_arg ()
+        }
     in
     List.mapi cds ~f:mapi
 end
@@ -424,7 +440,7 @@ module Typerep_implementation = struct
           [%expr  [%e ebool ~loc polymorphic] ]
 
       let tags ~loc ~typerep_of_type ~variants =
-        let create ({ Variant_case.arity ; _ } as variant) =
+        let create ({ Variant_case.arity ; args_labels; _ } as variant) =
           if arity = 0
           then
             [%expr Typerep_lib.Std.Typerep.Tag_internal.Const
@@ -438,7 +454,13 @@ module Typerep_implementation = struct
               in
               let expr =
                 let f i = evar ~loc @@ arg_tuple i in
-                let args = pexp_tuple ~loc (List.init arity ~f) in
+                let args =
+                  match args_labels with
+                  | [] -> pexp_tuple ~loc (List.init arity ~f)
+                  | (_::_) as labels ->
+                    pexp_record ~loc (List.mapi labels ~f:(fun i label ->
+                      Located.lident ~loc label, f i)) None
+                in
                 Variant_case.expr ~loc variant (Some args)
               in
               patt, expr
@@ -446,7 +468,8 @@ module Typerep_implementation = struct
             [%expr  Typerep_lib.Std.Typerep.Tag_internal.Args
                       (fun [%p patt] -> [%e expr]) ]
         in
-        let mapi index' ({ Variant_case.ctyp ; label ; arity ; index ; _ } as variant) =
+        let mapi index' ({ Variant_case.ctyp; label; arity; args_labels; index ; _ }
+                         as variant) =
           if index <> index' then assert false;
           let rep, tyid =
             match ctyp with
@@ -455,16 +478,20 @@ module Typerep_implementation = struct
             | None ->
               [%expr typerep_of_tuple0], [%expr typename_of_tuple0]
           in
+          let args_labels =
+            List.map args_labels ~f:(fun x -> estring ~loc x)
+          in
           index, [%expr
             Typerep_lib.Std.Typerep.Tag.internal_use_only
               { Typerep_lib.Std.Typerep.Tag_internal.
-                label       = [%e estring ~loc label];
-                rep         = [%e rep];
-                arity       = [%e eint ~loc arity];
-                index       = [%e eint ~loc index];
-                ocaml_repr  = [%e Variant_case.ocaml_repr ~loc variant];
-                tyid        = [%e tyid];
-                create      = [%e create variant];
+                label       = [%e estring ~loc label]
+              ; rep         = [%e rep]
+              ; arity       = [%e eint ~loc arity]
+              ; args_labels = [%e elist ~loc args_labels]
+              ; index       = [%e eint ~loc index]
+              ; ocaml_repr  = [%e Variant_case.ocaml_repr ~loc variant]
+              ; tyid        = [%e tyid]
+              ; create      = [%e create variant]
               }
           ]
         in
@@ -473,7 +500,7 @@ module Typerep_implementation = struct
       let value ~loc ~variants =
           let match_cases =
             let arg_tuple i = "v" ^ string_of_int i in
-            let mapi index' ({ Variant_case.arity ; index ; _ } as variant) =
+            let mapi index' ({ Variant_case.arity ; index ; args_labels; _ } as variant) =
               if index <> index' then assert false;
               let patt, value =
                 if arity = 0 then
@@ -481,7 +508,13 @@ module Typerep_implementation = struct
                 else
                   let patt =
                     let f i = pvar ~loc @@ arg_tuple i in
-                    let args = ppat_tuple ~loc (List.init arity ~f) in
+                    let args =
+                      match args_labels with
+                      | [] -> ppat_tuple ~loc (List.init arity ~f)
+                      | (_::_) as labels ->
+                        ppat_record ~loc (List.mapi labels ~f:(fun i label ->
+                          Located.lident ~loc label, f i)) Closed
+                    in
                     Variant_case.patt ~loc variant (Some args)
                   in
                   let expr =
