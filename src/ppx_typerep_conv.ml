@@ -535,26 +535,11 @@ module Typerep_implementation = struct
     end
   end
 
-  let ldot path s : Longident.t =
-    match path with
-    | None -> Lident s
-    | Some p -> Ldot (p, s)
-
-  let mk_abst_call loc tn path =
-    pexp_ident ~loc @@ Located.mk ~loc @@ ldot path ("typerep_of_" ^ tn)
-
-  (* Conversion of type paths *)
-  let typerep_of_path_fun loc (id : Longident.t) =
-    match id with
-    | Lident tn    -> mk_abst_call loc tn None
-    | Ldot (p, tn) -> mk_abst_call loc tn (Some p)
-    | Lapply _     -> Location.raise_errorf ~loc "ppx_typerep_conv: invalid identifier"
-
   let rec typerep_of_type ty =
     let loc = ty.ptyp_loc in
     match ty.ptyp_desc with
     | Ptyp_constr (id, params) ->
-      eapply ~loc (typerep_of_path_fun id.loc id.txt)
+      type_constr_conv ~loc id ~f:(fun tn -> "typerep_of_" ^ tn)
         (List.map params ~f:typerep_of_type)
     | Ptyp_var parm -> evar ~loc @@ Util.arg_of_param parm
     | Ptyp_variant (row_fields, _, _) ->
