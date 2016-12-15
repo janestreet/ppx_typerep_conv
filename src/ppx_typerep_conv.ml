@@ -269,7 +269,7 @@ module Typerep_implementation = struct
           ptyp_constr ~loc (Located.lident ~loc type_name)
             (List.map params_names ~f:(ptyp_var ~loc))
         in
-        nonrec_type_declaration ~loc ~name:(Located.mk ~loc "t")
+        type_declaration ~loc ~name:(Located.mk ~loc "t")
           ~params
           ~manifest:(Some manifest)
           ~kind:Ptype_abstract
