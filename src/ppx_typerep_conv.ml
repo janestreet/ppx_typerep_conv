@@ -1,47 +1,14 @@
-open StdLabels
-open Ppx_core.Std
+open Ppx_core
 open Ppx_type_conv.Std
-open Asttypes
-open Parsetree
 open Ast_builder.Default
 
-[@@@metaloc loc]
+let ( @@ ) a b = a b
 
 
 module Gen = struct
   let let_in loc list_lid_expr body =
     List.fold_right list_lid_expr ~init:body ~f:(fun (lid, expr) body ->
       [%expr let [%p pvar ~loc lid] = [%e expr] in [%e body] ])
-end
-
-module List = struct
-  include List
-  let init ~f n =
-    let rec aux acc index =
-      if index < 0 then acc else
-        let acc = f index :: acc in
-        aux acc (pred index)
-    in
-    aux [] (pred n)
-
-  let fold_righti list ~f ~init =
-    let length = length list in
-    let (acc, _) =
-      fold_right
-        ~f:(fun el (acc, index) -> let acc = f index el acc in (acc, pred index))
-        ~init:(init, pred length)
-        list
-    in
-    acc
-
-  let mapi ~f list =
-    let rev, _ =
-      fold_left
-        ~f:(fun (acc, index) el -> f index el :: acc, succ index)
-        ~init:([], 0)
-        list
-    in
-    List.rev rev
 end
 
 module Field_case = struct
@@ -99,8 +66,8 @@ module Branches = struct
   let row_fields rfs =
       (* duplicates like [ `A | `B | `A ] cause warnings in the generated code (duplicated
          patterns), so we don't have to deal with them. *)
-      let no_arg = let r = ref (-1) in fun () -> incr r; !r in
-      let with_arg = let r = ref (-1) in fun () -> incr r; !r in
+      let no_arg = let r = ref (-1) in fun () -> r := !r + 1; !r in
+      let with_arg = let r = ref (-1) in fun () -> r := !r + 1; !r in
       let mapi index rf : Variant_case.t =
         match rf with
         | Rtag (label, _, true, _) | Rtag (label, _, _, []) ->
@@ -128,10 +95,10 @@ module Branches = struct
       List.mapi rfs ~f:mapi
 
   let constructors cds =
-    let no_arg = let r = ref (-1) in fun () -> incr r; !r in
-    let with_arg = let r = ref (-1) in fun () -> incr r; !r in
+    let no_arg = let r = ref (-1) in fun () -> r := !r + 1; !r in
+    let with_arg = let r = ref (-1) in fun () -> r := !r + 1; !r in
     let mapi index cd : Variant_case.t =
-      if cd.pcd_res <> None then
+      if Option.is_some cd.pcd_res then
         Location.raise_errorf ~loc:cd.pcd_loc
           "ppx_typerep_conv: GADTs not supported";
       let label = cd.pcd_name.txt in
@@ -189,18 +156,17 @@ module Typerep_signature = struct
     let loc = td.ptype_loc in
     let type_name = td.ptype_name.txt in
     [ psig_value ~loc (value_description ~loc
-                         ~name:(Located.mk ~loc @@ "typerep_of_"  ^ type_name)
+                         ~name:(Located.mk ~loc ("typerep_of_"  ^ type_name))
                          ~type_:typerep_of
                          ~prim:[])
     ; psig_value ~loc (value_description ~loc
-                         ~name:(Located.mk ~loc @@ "typename_of_" ^ type_name)
+                         ~name:(Located.mk ~loc ("typename_of_" ^ type_name))
                          ~type_:typename_of
                          ~prim:[])
     ]
 
   let sig_generator ~loc:_ ~path:_ (_rec_flag, tds) =
-    List.map tds ~f:sig_of_one_def
-    |> List.flatten
+    List.concat_map tds ~f:sig_of_one_def
 
   let gen = Type_conv.Generator.make Type_conv.Args.empty sig_generator
 end
@@ -334,7 +300,7 @@ module Typerep_implementation = struct
       let type_arity = List.length params_names in
       let make =
         pmod_ident ~loc @@ Located.lident ~loc @@
-        "Typerep_lib.Std.Make_typename.Make" ^ string_of_int type_arity
+        "Typerep_lib.Std.Make_typename.Make" ^ Int.to_string type_arity
       in
       let type_name_struct =
         str_item_type_and_name ~loc ~path ~params_names ~type_name
@@ -361,13 +327,13 @@ module Typerep_implementation = struct
       let type_arity = List.length params_names in
       let make =
         pmod_ident ~loc @@ Located.lident ~loc @@
-        "Typerep_lib.Std.Type_abstract.Make" ^ string_of_int type_arity
+        "Typerep_lib.Std.Type_abstract.Make" ^ Int.to_string type_arity
       in
       pstr_include ~loc @@ include_infos ~loc @@ pmod_apply ~loc make type_name_struct
 
     let field_or_tag_n_ident prefix ~list n =
       if n < 0 || n > List.length list then assert false;
-      prefix ^ string_of_int n
+      prefix ^ Int.to_string n
 
     module Record = struct
       let field_n_ident ~fields:list = field_or_tag_n_ident "field" ~list
@@ -417,12 +383,10 @@ module Typerep_implementation = struct
             List.map ~f:map fields
           in
           let record = pexp_record ~loc fields_binding None in
-          let foldi index' { Field_case.label ; index; _ } acc =
-            if index <> index' then assert false;
-            let rhs = [%expr get [%e evar ~loc @@ field_n_ident ~fields index] ] in
-            [%expr let [%p pvar ~loc label] = [%e rhs] in [%e acc] ]
-          in
-          List.fold_righti fields ~f:foldi ~init:record
+          List.iteri fields ~f:(fun i { Field_case.index; _ } -> assert (i = index));
+          List.fold_right fields ~init:record ~f:(fun { Field_case.label ; index; _ } acc ->
+              let rhs = [%expr get [%e evar ~loc @@ field_n_ident ~fields index] ] in
+              [%expr let [%p pvar ~loc label] = [%e rhs] in [%e acc] ])
         in
         [%expr fun { Typerep_lib.Std.Typerep.Record_internal.get = get } -> [%e record] ]
     end
@@ -446,7 +410,7 @@ module Typerep_implementation = struct
             [%expr Typerep_lib.Std.Typerep.Tag_internal.Const
                      [%e Variant_case.expr ~loc variant None] ]
           else
-            let arg_tuple i = "v" ^ string_of_int i in
+            let arg_tuple i = "v" ^ Int.to_string i in
             let patt, expr =
               let patt =
                 let f i = pvar ~loc @@ arg_tuple i in
@@ -499,7 +463,7 @@ module Typerep_implementation = struct
 
       let value ~loc ~variants =
           let match_cases =
-            let arg_tuple i = "v" ^ string_of_int i in
+            let arg_tuple i = "v" ^ Int.to_string i in
             let mapi index' ({ Variant_case.arity ; index ; args_labels; _ } as variant) =
               if index <> index' then assert false;
               let patt, value =
@@ -558,7 +522,7 @@ module Typerep_implementation = struct
         Location.raise_errorf ~loc
           "ppx_type_conv: unsupported tuple arity %d. must be in {2,3,4,5}" len
       else
-        evar ~loc @@ "typerep_of_tuple" ^ string_of_int len
+        evar ~loc @@ "typerep_of_tuple" ^ Int.to_string len
     in
     eapply ~loc typerep_of_tuple typereps
 
@@ -672,7 +636,7 @@ module Typerep_implementation = struct
     let params_names = Util.params_names ~params in
     let params_patts = Util.params_patts ~loc ~params_names in
     let body = Util.with_named ~loc ~type_name ~params_names body in
-    let arguments = List.map2 params_names params_patts ~f:(fun name patt ->
+    let arguments = List.map2_exn params_names params_patts ~f:(fun name patt ->
       (* Add type annotations to parameters, at least to avoid the unused type warning. *)
       let loc = patt.ppat_loc in
       [%pat?  ([%p patt] : [%t ptyp_constr ~loc (Located.lident ~loc name) []]
@@ -700,10 +664,10 @@ module Typerep_implementation = struct
   let with_typerep ~loc ~path (rec_flag, tds) =
     let rec_flag = really_recursive rec_flag tds in
     let prelude, bindings =
-      List.split (List.map_right_to_left tds
+      List.unzip (List.map_right_to_left tds
                     ~f:(impl_of_one_def ~loc ~path))
     in
-    List.flatten prelude @ [ pstr_value ~loc rec_flag bindings ]
+    List.concat prelude @ [ pstr_value ~loc rec_flag bindings ]
 
   let with_typerep_abstract ~loc:_ ~path (_rec_flag, tds) =
     List.map tds ~f:(fun td ->
