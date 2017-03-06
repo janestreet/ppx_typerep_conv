@@ -1,3 +1,8 @@
+---
+title: ppx_typerep_conv
+parent: ../README.md
+---
+
 Automatic generation of runtime types from type definitions.
 
 This syntax extension defines the type-conv generator `[@@deriving typerep]`, which
