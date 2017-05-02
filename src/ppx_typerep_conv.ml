@@ -690,12 +690,12 @@ module Typerep_implementation = struct
   let typerep_of_extension ~loc:_ ~path:_ ctyp = typerep_of_type ctyp
 end
 
-let () =
+let typerep =
   Type_conv.add "typerep"
     ~sig_type_decl:Typerep_signature.gen
     ~str_type_decl:Typerep_implementation.gen
-  |> Type_conv.ignore;
+
+let () =
   Type_conv.add "typerep_of"
     ~extension:Typerep_implementation.typerep_of_extension
-  |> Type_conv.ignore;
-;;
+  |> Type_conv.ignore
