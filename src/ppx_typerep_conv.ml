@@ -292,7 +292,7 @@ module Typerep_implementation = struct
             [%type: [%t ty] Typerep_lib.Std.Typerep.t])
         in
         Some (ptyp_poly ~loc:td.ptype_loc
-                (List.map params ~f:(fun x -> (get_type_param_name x).txt))
+                (List.map params ~f:get_type_param_name)
                 t)
 
     let type_name_module_definition ~loc ~path ~type_name ~params_names =
@@ -644,7 +644,7 @@ module Typerep_implementation = struct
     in
     let body = eabstract ~loc arguments body in
     let body = List.fold_right params_names ~init:body ~f:(fun name acc ->
-      pexp_newtype ~loc name acc)
+      pexp_newtype ~loc { txt = name; loc; } acc)
     in
     let bnd = pvar ~loc @@ "typerep_of_" ^ type_name in
     let bnd =
