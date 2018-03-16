@@ -1,5 +1,5 @@
-open Ppx_core
-open Ppx_type_conv.Std
+open Base
+open Ppxlib
 open Ast_builder.Default
 
 let ( @@ ) a b = a b
@@ -168,7 +168,7 @@ module Typerep_signature = struct
   let sig_generator ~loc:_ ~path:_ (_rec_flag, tds) =
     List.concat_map tds ~f:sig_of_one_def
 
-  let gen = Type_conv.Generator.make Type_conv.Args.empty sig_generator
+  let gen = Deriving.Generator.make Deriving.Args.empty sig_generator
 end
 
 module Typerep_implementation = struct
@@ -678,8 +678,8 @@ module Typerep_implementation = struct
       Util.typerep_abstract ~loc ~path ~type_name ~params_names)
 
   let gen =
-    Type_conv.Generator.make
-      Type_conv.Args.(empty
+    Deriving.Generator.make
+      Deriving.Args.(empty
                       +> flag "abstract")
       (fun ~loc ~path x abstract ->
          if abstract
@@ -691,11 +691,11 @@ module Typerep_implementation = struct
 end
 
 let typerep =
-  Type_conv.add "typerep"
+  Deriving.add "typerep"
     ~sig_type_decl:Typerep_signature.gen
     ~str_type_decl:Typerep_implementation.gen
 
 let () =
-  Type_conv.add "typerep_of"
+  Deriving.add "typerep_of"
     ~extension:Typerep_implementation.typerep_of_extension
-  |> Type_conv.ignore
+  |> Deriving.ignore
