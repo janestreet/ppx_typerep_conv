@@ -70,7 +70,7 @@ module Branches = struct
       let with_arg = let r = ref (-1) in fun () -> r := !r + 1; !r in
       let mapi index rf : Variant_case.t =
         match rf with
-        | Rtag (label, _, true, _) | Rtag (label, _, _, []) ->
+        | Rtag ({ txt = label; _ }, _, true, _) | Rtag ({ txt = label; _ }, _, _, []) ->
           { label
           ; ctyp = None
           ; args_labels = []
@@ -79,7 +79,7 @@ module Branches = struct
           ; index
           ; arity_index = no_arg ()
           }
-        | Rtag (label, _, false, ctyp :: _) ->
+        | Rtag ({ txt = label; _ }, _, false, ctyp :: _) ->
           { label
           ; ctyp = Some ctyp
           ; args_labels = []
