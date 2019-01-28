@@ -165,8 +165,13 @@ module Typerep_signature = struct
                          ~prim:[])
     ]
 
-  let sig_generator ~loc:_ ~path:_ (_rec_flag, tds) =
-    List.concat_map tds ~f:sig_of_one_def
+  let sig_generator ~loc ~path:_ (_rec_flag, tds) =
+    match
+      mk_named_sig ~loc ~sg_name:"Typerep_lib.Typerepable.S"
+        ~handle_polymorphic_variant:true tds
+    with
+    | Some include_infos -> [psig_include ~loc include_infos]
+    | None -> List.concat_map tds ~f:sig_of_one_def
 
   let gen = Deriving.Generator.make Deriving.Args.empty sig_generator
 end
