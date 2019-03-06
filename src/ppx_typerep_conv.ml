@@ -667,6 +667,7 @@ module Typerep_implementation = struct
   end
 
   let with_typerep ~loc ~path (rec_flag, tds) =
+    let tds = List.map tds ~f:name_type_params_in_td in
     let rec_flag = really_recursive rec_flag tds in
     let prelude, bindings =
       List.unzip (List.map_right_to_left tds
@@ -676,6 +677,7 @@ module Typerep_implementation = struct
 
   let with_typerep_abstract ~loc:_ ~path (_rec_flag, tds) =
     List.map tds ~f:(fun td ->
+      let td = name_type_params_in_td td in
       let loc = td.ptype_loc in
       let type_name = td.ptype_name.txt in
       let params = td.ptype_params in
