@@ -388,10 +388,15 @@ module Typerep_implementation = struct
             List.map ~f:map fields
           in
           let record = pexp_record ~loc fields_binding None in
-          List.iteri fields ~f:(fun i { Field_case.index; _ } -> assert (i = index));
-          List.fold_right fields ~init:record ~f:(fun { Field_case.label ; index; _ } acc ->
-              let rhs = [%expr get [%e evar ~loc @@ field_n_ident ~fields index] ] in
-              [%expr let [%p pvar ~loc label] = [%e rhs] in [%e acc] ])
+          let vbs =
+            List.mapi fields ~f:(fun i { Field_case.index; label; _ } ->
+              assert (i = index);
+              let pat = pvar ~loc label in
+              let expr = [%expr get [%e evar ~loc @@ field_n_ident ~fields index] ] in
+              value_binding ~loc ~pat ~expr
+            )
+          in
+          pexp_let ~loc Nonrecursive vbs record
         in
         [%expr fun { Typerep_lib.Std.Typerep.Record_internal.get = get } -> [%e record] ]
     end
