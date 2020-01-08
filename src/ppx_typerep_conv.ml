@@ -510,7 +510,7 @@ module Typerep_implementation = struct
   end
 
   let rec typerep_of_type ty =
-    let loc = ty.ptyp_loc in
+    let loc = { ty.ptyp_loc with loc_ghost = true } in
     match ty.ptyp_desc with
     | Ptyp_constr (id, params) ->
       type_constr_conv ~loc id ~f:(fun tn -> "typerep_of_" ^ tn)
