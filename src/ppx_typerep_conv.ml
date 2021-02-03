@@ -633,7 +633,7 @@ module Typerep_implementation = struct
         | None ->
           Location.raise_errorf ~loc
             "typerep cannot be applied on abstract types, except \
-             like 'type t [@@deriving typerep ~abstract]'"
+             like 'type t [@@@@deriving typerep ~abstract]'"
         | Some ty ->
           match ty.ptyp_desc with
           | Ptyp_variant (row_fields, _, _) ->
