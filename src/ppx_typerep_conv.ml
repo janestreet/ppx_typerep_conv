@@ -372,7 +372,7 @@ module Typerep_implementation = struct
             (* The value must be a float else this segfaults.  This is tested by the
                unit tests in case this property changes. *)
             (Located.lident ~loc label,
-             [%expr Typerep_lib.Std.Typerep_obj.double_array_value ])
+             [%expr Typerep_lib.Std.Typerep_obj.double_array_value () ])
           in
           List.map ~f:map fields
         in
