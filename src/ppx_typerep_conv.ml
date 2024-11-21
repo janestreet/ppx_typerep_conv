@@ -724,17 +724,20 @@ module Typerep_implementation = struct
 
   let rec typerep_of_type ty =
     let loc = { ty.ptyp_loc with loc_ghost = true } in
-    match ty.ptyp_desc with
+    match Ppxlib_jane.Shim.Core_type_desc.of_parsetree ty.ptyp_desc with
     | Ptyp_constr (id, params) ->
       type_constr_conv
         ~loc
         id
         ~f:(fun tn -> "typerep_of_" ^ tn)
         (List.map params ~f:typerep_of_type)
-    | Ptyp_var parm -> evar ~loc @@ Util.arg_of_param parm
+    | Ptyp_var (parm, _) -> evar ~loc @@ Util.arg_of_param parm
     | Ptyp_variant (row_fields, _, _) ->
       typerep_of_variant loc ~type_name:None (Branches.row_fields row_fields)
-    | Ptyp_tuple tuple -> typerep_of_tuple loc tuple
+    | Ptyp_tuple labeled_typs ->
+      (match Ppxlib_jane.as_unlabeled_tuple labeled_typs with
+       | Some typs -> typerep_of_tuple loc typs
+       | None -> Location.raise_errorf ~loc "ppx_typerep: labeled tuples unsupported")
     | _ -> Location.raise_errorf ~loc "ppx_typerep: unknown type"
 
   and typerep_of_tuple loc tuple =
