@@ -717,7 +717,7 @@ module Typerep_implementation = struct
           in
           List.mapi ~f:mapi variants
         in
-        pexp_function ~loc match_cases
+        pexp_function_cases ~loc match_cases
       ;;
     end
   end
