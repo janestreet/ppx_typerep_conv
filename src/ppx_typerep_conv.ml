@@ -13,36 +13,24 @@ module Gen = struct
   ;;
 end
 
-module Layout = struct
-  type t =
-    | Value
-    | Non_value
-end
-
 module Field_case = struct
   type t =
     { label : string
     ; ctyp : core_type
     ; index : int
     ; mutable_flag : Asttypes.mutable_flag
-    ; layout : Layout.t
     }
 end
 
 module Variant_case = struct
   module Args = struct
     type t =
-      | Inline_record of (string * core_type * Layout.t) list
-      | Tupled of (core_type * Layout.t) list
+      | Inline_record of (string * core_type) list
+      | Tupled of core_type list
 
     let ctys = function
-      | Inline_record args -> List.map args ~f:(fun (_, cty, _) -> cty)
-      | Tupled args -> List.map args ~f:fst
-    ;;
-
-    let layouts = function
-      | Inline_record args -> List.map args ~f:(fun (_, _, layout) -> layout)
-      | Tupled args -> List.map args ~f:snd
+      | Inline_record args -> List.map args ~f:(fun (_, cty) -> cty)
+      | Tupled args -> args
     ;;
   end
 
@@ -79,24 +67,6 @@ module Variant_case = struct
   ;;
 end
 
-module Attrs = struct
-  let non_value_ld =
-    Attribute.declare
-      "typerep.non_value"
-      Attribute.Context.label_declaration
-      Ast_pattern.(pstr nil)
-      ()
-  ;;
-
-  let non_value_cty =
-    Attribute.declare
-      "typerep.non_value"
-      Attribute.Context.core_type
-      Ast_pattern.(pstr nil)
-      ()
-  ;;
-end
-
 module Branches = struct
   let fields fields =
     let mapi index ld : Field_case.t =
@@ -104,10 +74,6 @@ module Branches = struct
       ; ctyp = ld.pld_type
       ; index
       ; mutable_flag = ld.pld_mutable
-      ; layout =
-          (match Attribute.get Attrs.non_value_ld ld with
-           | None -> Value
-           | Some _ -> Non_value)
       }
     in
     List.mapi fields ~f:mapi
@@ -141,7 +107,7 @@ module Branches = struct
         }
       | Rtag ({ txt = label; _ }, false, ctyp :: _) ->
         { label
-        ; args = Tupled [ ctyp, Value ]
+        ; args = Tupled [ ctyp ]
         ; args_loc = rf.prf_loc
         ; poly = true
         ; arity = 1
@@ -182,16 +148,7 @@ module Branches = struct
         ; arity_index = no_arg ()
         }
       | Pcstr_tuple args ->
-        let args =
-          List.map args ~f:(fun arg ->
-            let cty = Ppxlib_jane.Shim.Pcstr_tuple_arg.to_core_type arg in
-            let layout : Layout.t =
-              match Attribute.get Attrs.non_value_cty cty with
-              | Some _ -> Non_value
-              | None -> Value
-            in
-            cty, layout)
-        in
+        let args = List.map args ~f:Ppxlib_jane.Shim.Pcstr_tuple_arg.to_core_type in
         let arity = List.length args in
         { label
         ; args = Tupled args
@@ -203,15 +160,10 @@ module Branches = struct
         }
       | Pcstr_record labels ->
         let args =
-          List.map labels ~f:(fun ({ pld_type; pld_name; _ } as ld) ->
+          List.map labels ~f:(fun { pld_type; pld_name; _ } ->
             let label = pld_name.txt in
             let cty = pld_type in
-            let layout : Layout.t =
-              match Attribute.get Attrs.non_value_ld ld with
-              | Some _ -> Non_value
-              | None -> Value
-            in
-            label, cty, layout)
+            label, cty)
         in
         let arity = List.length args in
         { label
@@ -399,7 +351,7 @@ module Typerep_implementation = struct
       let args =
         [%expr
           [%e evar ~loc name_of_t]
-          , Some (Typerep_lib.For_ppx.Portable_lazy.from_fun (fun () -> [%e expr]))]
+          , First (Typerep_lib.For_ppx.Portable_lazy.from_fun (fun () -> [%e expr]))]
       in
       [%expr
         let [%p pvar ~loc name_of_t] = [%e name_t] in
@@ -441,35 +393,6 @@ module Typerep_implementation = struct
       [ module_def; typename_of_t ]
     ;;
 
-    let constrain_index ~loc ~rep ~layout =
-      let index_typ = ptyp_var ~loc (gen_symbol ~prefix:"a" ()) in
-      let index_typ_constraint =
-        let reified_index, hint =
-          let loc = { loc with loc_ghost = false } in
-          match (layout : Layout.t) with
-          | Non_value ->
-            [%expr `non_value], "Remove [@non_value] from value fields to derive typerep."
-          | Value ->
-            [%expr `value], "Add [@non_value] to unboxed fields to derive typerep."
-        in
-        Ast_helper.Exp.attr
-          [%expr ([%e reified_index] : [%t index_typ])]
-          (attribute
-             ~loc
-             ~name:{ loc; txt = "ocaml.error_message" }
-             ~payload:
-               (PStr
-                  [ pstr_eval
-                      ~loc
-                      (pexp_constant ~loc (Pconst_string ("Hint: " ^ hint, loc, None)))
-                      []
-                  ]))
-      in
-      [%expr
-        ignore ([%e rep] : (_, [%t index_typ]) Typerep_lib.Std.Typerep.t_any);
-        ignore [%e index_typ_constraint]]
-    ;;
-
     let typerep_abstract ~loc ~path ~type_name ~params_names =
       let type_name_struct = str_item_type_and_name ~loc ~path ~params_names ~type_name in
       let type_arity = List.length params_names in
@@ -491,7 +414,7 @@ module Typerep_implementation = struct
       let field_n_ident ~fields:list = field_or_tag_n_ident "field" ~list
 
       let fields ~loc ~typerep_of_type ~fields =
-        let map { Field_case.ctyp; label; index; mutable_flag; layout; _ } =
+        let map { Field_case.ctyp; label; index; mutable_flag; _ } =
           let rep = typerep_of_type ctyp in
           let is_mutable =
             match mutable_flag with
@@ -499,22 +422,16 @@ module Typerep_implementation = struct
             | Immutable -> false
           in
           let get =
-            match layout with
-            | Non_value ->
-              [%expr
-                fun t () -> [%e pexp_field ~loc [%expr t] (Located.lident ~loc label)]]
-            | Value ->
-              [%expr fun t -> [%e pexp_field ~loc [%expr t] (Located.lident ~loc label)]]
+            [%expr fun t () -> [%e pexp_field ~loc [%expr t] (Located.lident ~loc label)]]
           in
           ( index
           , label
           , [%expr
-              [%e constrain_index ~loc ~rep ~layout];
               Typerep_lib.Std.Typerep.Field.internal_use_only
                 { Typerep_lib.Std.Typerep.Field_internal.label = [%e estring ~loc label]
                 ; index = [%e eint ~loc index]
                 ; is_mutable = [%e ebool ~loc is_mutable]
-                ; rep = T [%e rep]
+                ; rep = [%e rep]
                 ; tyid = Typerep_lib.Std.Typename.create ()
                 ; get = [%e get]
                 }] )
@@ -524,21 +441,19 @@ module Typerep_implementation = struct
 
       let has_double_array_tag ~loc ~typerep_of_type ~fields =
         let fields_binding =
-          let map { Field_case.ctyp; label; layout; _ } =
+          let map { Field_case.ctyp; label; _ } =
             (* The value must be a float else this segfaults.  This is tested by the
                unit tests in case this property changes. *)
             ( Located.lident ~loc label
-            , match layout with
-              | Value -> [%expr Typerep_lib.Std.Typerep_obj.double_array_value ()]
-              | Non_value ->
-                let rep = typerep_of_type ctyp in
-                [%expr Typerep_lib.Std.Typerep_obj.double_array_non_value [%e rep] ()] )
+            , let rep = typerep_of_type ctyp in
+              [%expr Typerep_lib.Std.Typerep_obj.double_array_value [%e rep] ()] )
           in
           List.map ~f:map fields
         in
         [%expr
-          Typerep_lib.Std.Typerep_obj.has_double_array_tag
-            [%e pexp_record ~loc fields_binding None]]
+          Typerep_lib.For_ppx.Portable_lazy.from_fun (fun () ->
+            Typerep_lib.Std.Typerep_obj.has_double_array_tag
+              [%e pexp_record ~loc fields_binding None])]
       ;;
 
       let create ~loc ~fields =
@@ -553,15 +468,10 @@ module Typerep_implementation = struct
           in
           let record = pexp_record ~loc fields_binding None in
           let vbs =
-            List.mapi fields ~f:(fun i { Field_case.index; label; layout; _ } ->
+            List.mapi fields ~f:(fun i { Field_case.index; label; _ } ->
               assert (i = index);
               let pat = pvar ~loc label in
-              let expr =
-                match layout with
-                | Non_value ->
-                  [%expr get [%e evar ~loc @@ field_n_ident ~fields index] ()]
-                | Value -> [%expr get [%e evar ~loc @@ field_n_ident ~fields index]]
-              in
+              let expr = [%expr get [%e evar ~loc @@ field_n_ident ~fields index] ()] in
               value_binding ~loc ~pat ~expr)
           in
           pexp_let ~loc Nonrecursive vbs record
@@ -593,30 +503,34 @@ module Typerep_implementation = struct
           else (
             let arg_tuple i = "v" ^ Int.to_string i in
             let patt =
-              let f i = pvar ~loc @@ arg_tuple i in
-              ppat_tuple ~loc (List.init arity ~f)
+              if arity = 1
+              then pvar ~loc @@ arg_tuple 0
+              else (
+                let f i = None, pvar ~loc @@ arg_tuple i in
+                Ppxlib_jane.Ast_builder.Default.ppat_unboxed_tuple
+                  ~loc
+                  (List.init arity ~f)
+                  Closed)
             in
             let expr =
-              let f ~layout i =
-                let v = evar ~loc @@ arg_tuple i in
-                match (layout : Layout.t) with
-                | Value -> v
-                | Non_value -> [%expr [%e v] ()]
-              in
+              let f i = evar ~loc @@ arg_tuple i in
               let args =
                 match args with
-                | Tupled args ->
-                  pexp_tuple ~loc (List.mapi args ~f:(fun i (_, layout) -> f ~layout i))
+                | Tupled args -> pexp_tuple ~loc (List.mapi args ~f:(fun i _ -> f i))
                 | Inline_record args ->
                   pexp_record
                     ~loc
-                    (List.mapi args ~f:(fun i (label, _, layout) ->
-                       Located.lident ~loc label, f ~layout i))
+                    (List.mapi args ~f:(fun i (label, _) ->
+                       Located.lident ~loc label, f i))
                     None
               in
               Variant_case.expr ~loc variant (Some args)
             in
-            [%expr Typerep_lib.Std.Typerep.Tag_internal.Args (fun [%p patt] -> [%e expr])])
+            [%expr
+              Typerep_lib.Std.Typerep.Tag_internal.Args
+                (fun f ->
+                  let [%p patt] = f () in
+                  [%e expr])])
         in
         let mapi
           index'
@@ -626,32 +540,27 @@ module Typerep_implementation = struct
           let rep, tyid =
             match args with
             | Tupled [] -> [%expr typerep_of_tuple0], [%expr typename_of_tuple0]
-            | (Tupled (_ :: _) | Inline_record _) as args ->
-              let ctys = Variant_case.Args.ctys args in
-              ( typerep_of_type (ptyp_tuple ctys ~loc:args_loc)
+            | Tupled [ cty ] | Inline_record [ (_, cty) ] ->
+              typerep_of_type cty, [%expr Typerep_lib.Std.Typename.create ()]
+            | (Tupled (_ :: _ :: _) | Inline_record _) as args ->
+              let ctys =
+                List.map (Variant_case.Args.ctys args) ~f:(fun cty -> None, cty)
+              in
+              ( typerep_of_type
+                  (Ppxlib_jane.Ast_builder.Default.ptyp_unboxed_tuple ctys ~loc:args_loc)
               , [%expr Typerep_lib.Std.Typename.create ()] )
           in
           let args_labels =
             match args with
             | Tupled _ -> []
             | Inline_record args ->
-              List.map args ~f:(fun (label, _, _) -> estring ~loc label)
-          in
-          let additional_constraints =
-            match args with
-            | Tupled [] | Inline_record _ -> None
-            | Tupled args ->
-              let constraints =
-                List.map args ~f:(fun (ty, layout) ->
-                  constrain_index ~loc ~rep:(typerep_of_type ty) ~layout)
-              in
-              Some (esequence ~loc constraints)
+              List.map args ~f:(fun (label, _) -> estring ~loc label)
           in
           let body =
             [%expr
               Typerep_lib.Std.Typerep.Tag.internal_use_only
                 { Typerep_lib.Std.Typerep.Tag_internal.label = [%e estring ~loc label]
-                ; rep = T [%e rep]
+                ; rep = [%e rep]
                 ; arity = [%e eint ~loc arity]
                 ; args_labels = [%e elist ~loc args_labels]
                 ; index = [%e eint ~loc index]
@@ -659,14 +568,6 @@ module Typerep_implementation = struct
                 ; tyid = [%e tyid]
                 ; create = [%e create variant]
                 }]
-          in
-          let body =
-            match additional_constraints with
-            | None -> body
-            | Some cs ->
-              [%expr
-                [%e cs];
-                [%e body]]
           in
           index, body
         in
@@ -690,28 +591,28 @@ module Typerep_implementation = struct
                     | Inline_record args ->
                       ppat_record
                         ~loc
-                        (List.mapi args ~f:(fun i (label, _, _) ->
+                        (List.mapi args ~f:(fun i (label, _) ->
                            Located.lident ~loc label, f i))
                         Closed
                   in
                   Variant_case.patt ~loc variant (Some args)
                 in
                 let expr =
-                  let layouts = Variant_case.Args.layouts args in
-                  pexp_tuple
-                    ~loc
-                    (List.mapi layouts ~f:(fun i layout ->
-                       let v = evar ~loc @@ arg_tuple i in
-                       match (layout : Layout.t) with
-                       | Value -> v
-                       | Non_value -> [%expr fun () -> [%e v]]))
+                  let ctys = Variant_case.Args.ctys args in
+                  if arity = 1
+                  then evar ~loc @@ arg_tuple 0
+                  else
+                    Ppxlib_jane.Ast_builder.Default.pexp_unboxed_tuple
+                      ~loc
+                      (List.mapi ctys ~f:(fun i _ -> None, evar ~loc @@ arg_tuple i))
                 in
                 patt, expr)
             in
             let tag = evar ~loc @@ tag_n_ident ~variants index in
             let prod =
               [%expr
-                Typerep_lib.Std.Typerep.Variant_internal.Value ([%e tag], [%e value])]
+                Typerep_lib.Std.Typerep.Variant_internal.Value
+                  ([%e tag], fun () -> [%e value])]
             in
             case ~guard:None ~lhs:patt ~rhs:prod
           in
@@ -744,24 +645,40 @@ module Typerep_implementation = struct
       (match Ppxlib_jane.as_unlabeled_tuple labeled_typs with
        | Some typs -> typerep_of_tuple loc typs ~recur
        | None -> Location.raise_errorf ~loc "ppx_typerep: labeled tuples unsupported")
+    | Ptyp_unboxed_tuple labeled_typs ->
+      (match Ppxlib_jane.as_unlabeled_tuple labeled_typs with
+       | Some typs -> typerep_of_tuple_u loc typs ~recur
+       | None ->
+         Location.raise_errorf ~loc "ppx_typerep: labeled unboxed tuples unsupported")
     | _ -> Location.raise_errorf ~loc "ppx_typerep: unknown type"
 
   and typerep_of_tuple loc tuple ~recur =
     let typereps = List.map tuple ~f:(typerep_of_type ~recur) in
-    match typereps with
-    | [ typerep ] -> typerep
-    | _ ->
-      let typerep_of_tuple =
-        let len = List.length typereps in
-        if len < 2 || len > 5
-        then
-          Location.raise_errorf
-            ~loc
-            "ppx_type_conv: unsupported tuple arity %d. must be in {2,3,4,5}"
-            len
-        else evar ~loc @@ "typerep_of_tuple" ^ Int.to_string len
-      in
-      eapply ~loc typerep_of_tuple typereps
+    let typerep_of_tuple =
+      let len = List.length typereps in
+      if len < 2 || len > 5
+      then
+        Location.raise_errorf
+          ~loc
+          "ppx_type_conv: unsupported tuple arity %d. must be in {2,3,4,5}"
+          len
+      else evar ~loc @@ "typerep_of_tuple" ^ Int.to_string len
+    in
+    eapply ~loc typerep_of_tuple typereps
+
+  and typerep_of_tuple_u loc tuple ~recur =
+    let typereps = List.map tuple ~f:(typerep_of_type ~recur) in
+    let typerep_of_tuple_u =
+      let len = List.length typereps in
+      if len < 2 || len > 5
+      then
+        Location.raise_errorf
+          ~loc
+          "ppx_type_conv: unsupported unboxed tuple arity %d. must be in {2,3,4,5}"
+          len
+      else evar ~loc @@ Printf.sprintf "typerep_of_tuple%d_u" len
+    in
+    eapply ~loc typerep_of_tuple_u typereps
 
   and typerep_of_record loc ~recur ~type_name lds =
     let typerep_of_type = typerep_of_type ~recur in
