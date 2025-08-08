@@ -471,7 +471,7 @@ module Typerep_implementation = struct
             List.mapi fields ~f:(fun i { Field_case.index; label; _ } ->
               assert (i = index);
               let pat = pvar ~loc label in
-              let expr = [%expr get [%e evar ~loc @@ field_n_ident ~fields index] ()] in
+              let expr = [%expr (get [%e evar ~loc @@ field_n_ident ~fields index]) ()] in
               value_binding ~loc ~pat ~expr)
           in
           pexp_let ~loc Nonrecursive vbs record
