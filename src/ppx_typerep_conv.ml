@@ -180,17 +180,39 @@ module Branches = struct
 end
 
 module Typerep_signature = struct
+  let remove_jkinds td =
+    let params_without_jkinds =
+      List.map td.ptype_params ~f:(fun (ty, variance) ->
+        let ty_without_jkind =
+          match Ppxlib_jane.Shim.Core_type_desc.of_parsetree ty.ptyp_desc with
+          | Ptyp_var (name, _jkind) ->
+            { ty with
+              ptyp_desc =
+                Ppxlib_jane.Shim.Core_type_desc.to_parsetree (Ptyp_var (name, None))
+            }
+          | _ -> ty
+        in
+        ty_without_jkind, variance)
+    in
+    { td with ptype_params = params_without_jkinds }
+  ;;
+
   let sig_of_typerep_of_t td =
-    combinator_type_of_type_declaration td ~f:(fun ~loc ty ->
-      [%type: [%t ty] Typerep_lib.Std.Typerep.t])
+    let arg_type ~loc ty = [%type: [%t ty] Typerep_lib.Std.Typerep.t] in
+    Ppx_helpers.combinator_type_of_type_declaration td ~f:arg_type
+    |> Ppx_helpers.Polytype.to_core_type
+         ~universally_quantify_only_if_jkind_annotation:true
   ;;
 
   let sig_of_typename_of_t td =
-    combinator_type_of_type_declaration td ~f:(fun ~loc ty ->
-      [%type: [%t ty] Typerep_lib.Std.Typename.t])
+    let arg_type ~loc ty = [%type: [%t ty] Typerep_lib.Std.Typename.t] in
+    Ppx_helpers.combinator_type_of_type_declaration td ~f:arg_type
+    |> Ppx_helpers.Polytype.to_core_type
+         ~universally_quantify_only_if_jkind_annotation:true
   ;;
 
-  let sig_of_one_def td =
+  let sig_of_one_def td ~polymorphic =
+    let td = if not polymorphic then remove_jkinds td else td in
     let typerep_of = sig_of_typerep_of_t td in
     let typename_of = sig_of_typename_of_t td in
     let loc = td.ptype_loc in
@@ -202,7 +224,7 @@ module Typerep_signature = struct
            ~loc
            ~name
            ~type_
-           ~modalities:[ Ppxlib_jane.Modality "portable" ]
+           ~modalities:(Ppxlib_jane.Shim.Modalities.portable ~loc)
            ~prim:[])
     in
     [ psig_value ~name:(Located.mk ~loc ("typerep_of_" ^ type_name)) ~type_:typerep_of
@@ -210,7 +232,7 @@ module Typerep_signature = struct
     ]
   ;;
 
-  let sig_generator ~loc ~path:_ (_rec_flag, tds) =
+  let sig_generator ~loc ~path:_ ~polymorphic (_rec_flag, tds) =
     match
       mk_named_sig
         ~loc
@@ -220,42 +242,65 @@ module Typerep_signature = struct
     with
     | Some include_infos ->
       [ Ppxlib_jane.Ast_builder.Default.psig_include ~loc ~modalities:[] include_infos ]
-    | None -> List.concat_map tds ~f:sig_of_one_def
+    | None -> List.concat_map tds ~f:(sig_of_one_def ~polymorphic)
   ;;
 
   let gen =
-    Deriving.Generator.make_noarg (fun ~loc ~path tds -> sig_generator ~loc ~path tds)
+    Deriving.Generator.make
+      Deriving.Args.(empty +> arg "named" Ast_pattern.(ebool __))
+      (fun ~loc ~path tds named ->
+        let named = Option.value ~default:true named in
+        sig_generator ~loc ~path ~polymorphic:(not named) tds)
   ;;
 end
 
 module Typerep_implementation = struct
   module Util : sig
+    type param = string loc * Ppxlib_jane.jkind_annotation option
+
     val typename_field : loc:Location.t -> type_name:string option -> expression
-    val arg_of_param : string -> string
-    val params_names : params:(core_type * (variance * injectivity)) list -> string list
-    val params_patts : loc:Location.t -> params_names:string list -> pattern list
+    val arg_of_param : param -> string
+
+    (* Extracts useful data from a list of parameters as core types.
+
+       The [param list] returned is [~params], passed to other utility functions.
+       The [string] returned is the [~typename_functor] which is one from the
+       [Typerep_lib.Std.Make_typename.Make] (used when [~named]) or
+       [Typerep_lib.Typename.Make] (used when not [~named]) families.
+       The suffix indicates the number of type parameters and, through template
+       mangling, their jkinds.
+
+       Once we have jkind polymorphism, we should be able to remove template mangling from
+       the functors. *)
+    val parse_params
+      :  ptype_params:(core_type * (variance * injectivity)) list
+      -> named:bool
+      -> param list * string
+
+    val params_patts : loc:Location.t -> params:param list -> pattern list
 
     val type_name_module_definition
       :  loc:Location.t
       -> path:string
       -> type_name:string
-      -> params_names:string list
+      -> params:param list
+      -> typename_functor:string
       -> structure
 
     val with_named
       :  loc:Location.t
       -> type_name:string
-      -> params_names:string list
+      -> params:param list
       -> expression
       -> expression
 
-    val typerep_of_t : type_declaration -> core_type
+    val typerep_of_t : type_declaration -> params:param list -> core_type
 
     val typerep_abstract
       :  loc:Location.t
       -> path:string
       -> type_name:string
-      -> params_names:string list
+      -> params:param list
       -> structure_item
 
     module Record : sig
@@ -289,22 +334,25 @@ module Typerep_implementation = struct
       val polymorphic : loc:Location.t -> variants:Variant_case.t list -> expression
     end
   end = struct
-    let str_item_type_and_name ~loc ~path ~params_names ~type_name =
-      let params =
-        List.map params_names ~f:(fun name ->
-          ptyp_var ~loc name, (NoVariance, NoInjectivity))
+    type param = string loc * Ppxlib_jane.jkind_annotation option
+
+    let str_item_type_and_name ~loc ~path ~params ~type_name =
+      let ptype_params =
+        List.map params ~f:(fun (name, jkind) ->
+          ( Ppxlib_jane.Ast_builder.Default.Latest.ptyp_var ~loc name.txt jkind
+          , (NoVariance, NoInjectivity) ))
       in
       let td =
         let manifest =
           ptyp_constr
             ~loc
             (Located.lident ~loc type_name)
-            (List.map params_names ~f:(ptyp_var ~loc))
+            (List.map params ~f:(fun (name, _) -> ptyp_var name.txt ~loc))
         in
         type_declaration
           ~loc
           ~name:(Located.mk ~loc "t")
-          ~params
+          ~params:ptype_params
           ~manifest:(Some manifest)
           ~kind:Ptype_abstract
           ~cstrs:[]
@@ -317,7 +365,7 @@ module Typerep_implementation = struct
       pmod_structure ~loc [ pstr_type ~loc Nonrecursive [ td ]; name_def ]
     ;;
 
-    let arg_of_param name = "_of_" ^ name
+    let arg_of_param (name, _) = "_of_" ^ name.txt
     let name_of_t ~type_name = "name_of_" ^ type_name
 
     let typename_field ~loc ~type_name =
@@ -329,15 +377,38 @@ module Typerep_implementation = struct
             [%e evar ~loc @@ name_of_t ~type_name]]
     ;;
 
-    let params_names ~params = List.map params ~f:(fun x -> (get_type_param_name x).txt)
+    let parse_params ~ptype_params ~named =
+      let params = List.map ptype_params ~f:Ppxlib_jane.get_type_param_name_and_jkind in
+      let remove_jkinds params = List.map params ~f:(fun (name, _jkind) -> name, None) in
+      let arity_string = Int.to_string (List.length params) in
+      if named
+      then (
+        let typename_functor = "Typerep_lib.Std.Make_typename.Make" ^ arity_string in
+        remove_jkinds params, typename_functor)
+      else (
+        let typename_functor =
+          String.concat
+            ~sep:"__"
+            (("Typerep_lib.Typename.Make" ^ arity_string)
+             :: List.map params ~f:(function
+               | _, Some { pjkind_desc = Pjk_abbreviation kind; _ } -> kind
+               | _, None -> "value"
+               | _, Some { pjkind_loc = loc; _ } ->
+                 Location.raise_errorf
+                   ~loc
+                   "ppx_typerep: don't know how to mangle this kind compatibly with \
+                    ppx_template"))
+        in
+        params, typename_functor)
+    ;;
 
-    let params_patts ~loc ~params_names =
-      List.map params_names ~f:(fun s -> pvar ~loc @@ arg_of_param s)
+    let params_patts ~loc ~params =
+      List.map params ~f:(fun s -> pvar ~loc @@ arg_of_param s)
     ;;
 
     let type_name_module_name ~type_name = "Typename_of_" ^ type_name
 
-    let with_named ~loc ~type_name ~params_names expr =
+    let with_named ~loc ~type_name ~params expr =
       let name_t =
         eapply
           ~loc
@@ -345,7 +416,7 @@ module Typerep_implementation = struct
            @@ Located.lident ~loc
            @@ type_name_module_name ~type_name
            ^ ".named")
-          (List.map params_names ~f:(fun name -> evar ~loc @@ arg_of_param name))
+          (List.map params ~f:(fun name -> evar ~loc @@ arg_of_param name))
       in
       let name_of_t = name_of_t ~type_name in
       let args =
@@ -358,22 +429,16 @@ module Typerep_implementation = struct
         Typerep_lib.Std.Typerep.Named [%e args]]
     ;;
 
-    let typerep_of_t td =
+    let typerep_of_t td ~params =
       combinator_type_of_type_declaration td ~f:(fun ~loc ty ->
         [%type: [%t ty] Typerep_lib.Std.Typerep.t])
-      |> ptyp_poly ~loc:td.ptype_loc (List.map td.ptype_params ~f:get_type_param_name)
+      |> Ppxlib_jane.Ast_builder.Default.ptyp_poly ~loc:td.ptype_loc params
     ;;
 
-    let type_name_module_definition ~loc ~path ~type_name ~params_names =
+    let type_name_module_definition ~loc ~path ~type_name ~params ~typename_functor =
       let name = type_name_module_name ~type_name in
-      let type_arity = List.length params_names in
-      let make =
-        pmod_ident ~loc
-        @@ Located.lident ~loc
-        @@ "Typerep_lib.Std.Make_typename.Make"
-        ^ Int.to_string type_arity
-      in
-      let type_name_struct = str_item_type_and_name ~loc ~path ~params_names ~type_name in
+      let make = pmod_ident ~loc @@ Located.lident ~loc @@ typename_functor in
+      let type_name_struct = str_item_type_and_name ~loc ~path ~params ~type_name in
       let type_name_module = pmod_apply ~loc make type_name_struct in
       let module_def =
         pstr_module ~loc
@@ -393,9 +458,9 @@ module Typerep_implementation = struct
       [ module_def; typename_of_t ]
     ;;
 
-    let typerep_abstract ~loc ~path ~type_name ~params_names =
-      let type_name_struct = str_item_type_and_name ~loc ~path ~params_names ~type_name in
-      let type_arity = List.length params_names in
+    let typerep_abstract ~loc ~path ~type_name ~params =
+      let type_name_struct = str_item_type_and_name ~loc ~path ~params ~type_name in
+      let type_arity = List.length params in
       let make =
         pmod_ident ~loc
         @@ Located.lident ~loc
@@ -638,7 +703,7 @@ module Typerep_implementation = struct
         | None -> type_constr_conv ~loc id ~f:(fun tn -> "typerep_of_" ^ tn)
       in
       make_expr (List.map params ~f:(typerep_of_type ~recur))
-    | Ptyp_var (parm, _) -> evar ~loc @@ Util.arg_of_param parm
+    | Ptyp_var (name, jkind) -> evar ~loc @@ Util.arg_of_param ({ txt = name; loc }, jkind)
     | Ptyp_variant (row_fields, _, _) ->
       typerep_of_variant loc ~recur ~type_name:None (Branches.row_fields row_fields)
     | Ptyp_tuple labeled_typs ->
@@ -796,7 +861,7 @@ module Typerep_implementation = struct
       }
   end
 
-  let impl_of_one_def ~path ~recur td : Impl.t =
+  let impl_of_one_def ~path ~recur ~named td : Impl.t =
     let loc = td.ptype_loc in
     let type_name = td.ptype_name.txt in
     let body =
@@ -831,26 +896,34 @@ module Typerep_implementation = struct
                 (Branches.row_fields row_fields)
             | _ -> typerep_of_type ty ~recur))
     in
-    let params = td.ptype_params in
-    let params_names = Util.params_names ~params in
-    let params_patts = Util.params_patts ~loc ~params_names in
-    let body = Util.with_named ~loc ~type_name ~params_names body in
+    let params, typename_functor =
+      Util.parse_params ~named ~ptype_params:td.ptype_params
+    in
+    let params_patts = Util.params_patts ~loc ~params in
+    let body = if named then Util.with_named ~loc ~type_name ~params body else body in
     let arguments =
-      List.map2_exn params_names params_patts ~f:(fun name patt ->
+      List.map2_exn params params_patts ~f:(fun (name, _) patt ->
         (* Add type annotations to parameters, at least to avoid the unused type warning. *)
         let loc = patt.ppat_loc in
         [%pat?
           ([%p patt] :
-            [%t ptyp_constr ~loc (Located.lident ~loc name) []] Typerep_lib.Std.Typerep.t)])
+            [%t ptyp_constr ~loc (Located.lident ~loc name.txt) []]
+              Typerep_lib.Std.Typerep.t)])
     in
     let body = eabstract ~loc arguments body in
     let body =
-      List.fold_right params_names ~init:body ~f:(fun name acc ->
-        pexp_newtype ~loc { txt = name; loc } acc)
+      List.fold_right params ~init:body ~f:(fun (name, jkind) acc ->
+        Ppxlib_jane.Ast_builder.Default.pexp_newtype
+          ~loc
+          { txt = name.txt; loc }
+          jkind
+          acc)
     in
     let value_name = "typerep_of_" ^ type_name in
-    let core_type = Util.typerep_of_t td in
-    let prelude = Util.type_name_module_definition ~loc ~path ~type_name ~params_names in
+    let core_type = Util.typerep_of_t td ~params in
+    let prelude =
+      Util.type_name_module_definition ~loc ~path ~type_name ~params ~typename_functor
+    in
     { body; core_type; loc; prelude; type_name; value_name }
   ;;
 
@@ -861,10 +934,10 @@ module Typerep_implementation = struct
     let map_right_to_left xs ~f = rev xs |> map ~f |> rev
   end
 
-  let with_typrep_nonrecursive tds ~loc ~path =
+  let with_typrep_nonrecursive tds ~loc ~path ~named =
     let impls =
       List.map_right_to_left tds ~f:(fun td ->
-        impl_of_one_def td ~path ~recur:(fun ~type_name:_ -> None))
+        impl_of_one_def td ~path ~recur:(fun ~type_name:_ -> None) ~named)
     in
     let bindings =
       List.map
@@ -882,7 +955,7 @@ module Typerep_implementation = struct
     @ [ pstr_value ~loc Nonrecursive bindings ]
   ;;
 
-  let with_typrep_recursive tds ~loc ~path =
+  let with_typrep_recursive tds ~loc ~path ~named =
     let fixpoint_name = gen_symbol ~prefix:"fixpoint" () in
     let get_field_name_exn =
       let map =
@@ -914,7 +987,7 @@ module Typerep_implementation = struct
       in
       fun ~type_name -> Map.find map type_name
     in
-    let impls = List.map_right_to_left tds ~f:(impl_of_one_def ~path ~recur) in
+    let impls = List.map_right_to_left tds ~f:(impl_of_one_def ~path ~recur ~named) in
     let record_fields =
       List.map impls ~f:(fun { loc; core_type; type_name; _ } ->
         label_declaration
@@ -974,11 +1047,11 @@ module Typerep_implementation = struct
       ]
   ;;
 
-  let with_typerep ~loc ~path (rec_flag, tds) =
+  let with_typerep ~loc ~path ~named (rec_flag, tds) =
     let tds = List.map tds ~f:name_type_params_in_td in
     match really_recursive rec_flag tds with
-    | Nonrecursive -> with_typrep_nonrecursive tds ~loc ~path
-    | Recursive -> with_typrep_recursive tds ~loc ~path
+    | Nonrecursive -> with_typrep_nonrecursive tds ~loc ~path ~named
+    | Recursive -> with_typrep_recursive tds ~loc ~path ~named
   ;;
 
   let with_typerep_abstract ~loc:_ ~path (_rec_flag, tds) =
@@ -986,16 +1059,22 @@ module Typerep_implementation = struct
       let td = name_type_params_in_td td in
       let loc = td.ptype_loc in
       let type_name = td.ptype_name.txt in
-      let params = td.ptype_params in
-      let params_names = Util.params_names ~params in
-      Util.typerep_abstract ~loc ~path ~type_name ~params_names)
+      let params, _ = Util.parse_params ~named:true ~ptype_params:td.ptype_params in
+      Util.typerep_abstract ~loc ~path ~type_name ~params)
   ;;
 
   let gen =
     Deriving.Generator.make
-      Deriving.Args.(empty +> flag "abstract")
-      (fun ~loc ~path x abstract ->
-        if abstract then with_typerep_abstract ~loc ~path x else with_typerep ~loc ~path x)
+      Deriving.Args.(empty +> flag "abstract" +> arg "named" Ast_pattern.(ebool __))
+      (fun ~loc ~path x abstract named ->
+        let named = Option.value ~default:true named in
+        match named, abstract with
+        | false, true ->
+          Location.raise_errorf
+            ~loc
+            "ppx_typerep_conv: [~named:false] and [~abstract] are not supported together"
+        | true, true -> with_typerep_abstract ~loc ~path x
+        | named, false -> with_typerep ~loc ~path ~named x)
   ;;
 
   let typerep_of_extension ~loc:_ ~path:_ ctyp = typerep_of_type ctyp
