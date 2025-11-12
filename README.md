@@ -73,3 +73,18 @@ Error: In this `with' constraint, the new definition of t
 
 To workaround that error, simply copy the constraint on the type which has the
 `[@@deriving]` annotation. This will force generating a list of value bindings.
+
+## The `~named` Parameter
+
+By default, the typereps derived are named. To get a non-named typerep, you can pass
+`~named:false` to the deriver. This will result in a compile error if used with recursive
+types, and prevents the use of custom `Type_generic` implementations based on name.
+
+## Use in OxCaml
+
+### Non-`value` parameters
+
+`[@deriving typerep ~named:false]` has limited for support for non-value parameters. This
+deriver relies on versions of `Typerep_lib.Typename.Make` templated over jkinds. To
+support novel combinations of jkinds, the templates in `typerep_lib` will need to be
+updated.
