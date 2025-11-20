@@ -263,12 +263,11 @@ module Typerep_implementation = struct
 
     (* Extracts useful data from a list of parameters as core types.
 
-       The [param list] returned is [~params], passed to other utility functions.
-       The [string] returned is the [~typename_functor] which is one from the
+       The [param list] returned is [~params], passed to other utility functions. The
+       [string] returned is the [~typename_functor] which is one from the
        [Typerep_lib.Std.Make_typename.Make] (used when [~named]) or
-       [Typerep_lib.Typename.Make] (used when not [~named]) families.
-       The suffix indicates the number of type parameters and, through template
-       mangling, their jkinds.
+       [Typerep_lib.Typename.Make] (used when not [~named]) families. The suffix indicates
+       the number of type parameters and, through template mangling, their jkinds.
 
        Once we have jkind polymorphism, we should be able to remove template mangling from
        the functors. *)
@@ -507,8 +506,8 @@ module Typerep_implementation = struct
       let has_double_array_tag ~loc ~typerep_of_type ~fields =
         let fields_binding =
           let map { Field_case.ctyp; label; _ } =
-            (* The value must be a float else this segfaults.  This is tested by the
-               unit tests in case this property changes. *)
+            (* The value must be a float else this segfaults. This is tested by the unit
+               tests in case this property changes. *)
             ( Located.lident ~loc label
             , let rep = typerep_of_type ctyp in
               [%expr Typerep_lib.Std.Typerep_obj.double_array_value [%e rep] ()] )
