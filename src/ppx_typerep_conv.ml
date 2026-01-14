@@ -22,6 +22,14 @@ module Field_case = struct
     }
 end
 
+module Element_case = struct
+  type t =
+    { label : string option
+    ; ctyp : core_type
+    ; index : int
+    }
+end
+
 module Variant_case = struct
   module Args = struct
     type t =
@@ -80,7 +88,7 @@ module Branches = struct
   ;;
 
   let row_fields rfs =
-    (* duplicates like [ `A | `B | `A ] cause warnings in the generated code (duplicated
+    (*= duplicates like [ `A | `B | `A ] cause warnings in the generated code (duplicated
        patterns), so we don't have to deal with them. *)
     let no_arg =
       let r = ref (-1) in
@@ -216,7 +224,6 @@ module Typerep_signature = struct
     let typerep_of = sig_of_typerep_of_t td in
     let typename_of = sig_of_typename_of_t td in
     let loc = td.ptype_loc in
-    let type_name = td.ptype_name.txt in
     let psig_value ~name ~type_ =
       psig_value
         ~loc
@@ -227,6 +234,7 @@ module Typerep_signature = struct
            ~modalities:(Ppxlib_jane.Shim.Modalities.portable ~loc)
            ~prim:[])
     in
+    let type_name = Ppx_helpers.mangle_unboxed td.ptype_name.txt in
     [ psig_value ~name:(Located.mk ~loc ("typerep_of_" ^ type_name)) ~type_:typerep_of
     ; psig_value ~name:(Located.mk ~loc ("typename_of_" ^ type_name)) ~type_:typename_of
     ]
@@ -247,10 +255,11 @@ module Typerep_signature = struct
 
   let gen =
     Deriving.Generator.make
-      Deriving.Args.(empty +> arg "named" Ast_pattern.(ebool __))
-      (fun ~loc ~path tds named ->
+      Deriving.Args.(empty +> arg "named" Ast_pattern.(ebool __) +> flag "unboxed")
+      (fun ~loc ~path (rf, tds) named unboxed ->
         let named = Option.value ~default:true named in
-        sig_generator ~loc ~path ~polymorphic:(not named) tds)
+        let tds = Ppx_helpers.with_implicit_unboxed_records ~loc ~unboxed tds in
+        sig_generator ~loc ~path ~polymorphic:(not named) (rf, tds))
   ;;
 end
 
@@ -263,12 +272,11 @@ module Typerep_implementation = struct
 
     (* Extracts useful data from a list of parameters as core types.
 
-       The [param list] returned is [~params], passed to other utility functions.
-       The [string] returned is the [~typename_functor] which is one from the
+       The [param list] returned is [~params], passed to other utility functions. The
+       [string] returned is the [~typename_functor] which is one from the
        [Typerep_lib.Std.Make_typename.Make] (used when [~named]) or
-       [Typerep_lib.Typename.Make] (used when not [~named]) families.
-       The suffix indicates the number of type parameters and, through template
-       mangling, their jkinds.
+       [Typerep_lib.Typename.Make] (used when not [~named]) families. The suffix indicates
+       the number of type parameters and, through template mangling, their jkinds.
 
        Once we have jkind polymorphism, we should be able to remove template mangling from
        the functors. *)
@@ -309,16 +317,33 @@ module Typerep_implementation = struct
       val fields
         :  loc:Location.t
         -> typerep_of_type:(core_type -> expression)
+        -> unboxed:bool
         -> fields:Field_case.t list
         -> (int * string * expression) list
 
-      val create : loc:Location.t -> fields:Field_case.t list -> expression
+      val create
+        :  loc:Location.t
+        -> unboxed:bool
+        -> fields:Field_case.t list
+        -> expression
 
       val has_double_array_tag
         :  loc:Location.t
         -> typerep_of_type:(core_type -> expression)
         -> fields:Field_case.t list
         -> expression
+    end
+
+    module Tuple_l : sig
+      val element_n_ident : elements:Element_case.t list -> int -> string
+
+      val elements
+        :  loc:Location.t
+        -> typerep_of_type:(core_type -> expression)
+        -> elements:Element_case.t list
+        -> (int * string option * expression) list
+
+      val create : loc:Location.t -> elements:Element_case.t list -> expression
     end
 
     module Variant : sig
@@ -334,6 +359,18 @@ module Typerep_implementation = struct
       val polymorphic : loc:Location.t -> variants:Variant_case.t list -> expression
     end
   end = struct
+    let make_field_expr base field_name ~loc ~unboxed =
+      if unboxed
+      then Ppxlib_jane.Ast_builder.Default.pexp_unboxed_field base field_name ~loc
+      else pexp_field base field_name ~loc
+    ;;
+
+    let make_record_expr fields base ~loc ~unboxed =
+      if unboxed
+      then Ppxlib_jane.Ast_builder.Default.pexp_record_unboxed_product fields base ~loc
+      else pexp_record fields base ~loc
+    ;;
+
     type param = string loc * Ppxlib_jane.jkind_annotation option
 
     let str_item_type_and_name ~loc ~path ~params ~type_name =
@@ -359,6 +396,7 @@ module Typerep_implementation = struct
           ~private_:Public
       in
       let name_def =
+        let type_name = Ppx_helpers.mangle_unboxed type_name in
         let full_type_name = Printf.sprintf "%s.%s" path type_name in
         [%stri let name = [%e estring ~loc full_type_name]]
       in
@@ -366,7 +404,7 @@ module Typerep_implementation = struct
     ;;
 
     let arg_of_param (name, _) = "_of_" ^ name.txt
-    let name_of_t ~type_name = "name_of_" ^ type_name
+    let name_of_t ~type_name = "name_of_" ^ Ppx_helpers.mangle_unboxed type_name
 
     let typename_field ~loc ~type_name =
       match type_name with
@@ -406,7 +444,9 @@ module Typerep_implementation = struct
       List.map params ~f:(fun s -> pvar ~loc @@ arg_of_param s)
     ;;
 
-    let type_name_module_name ~type_name = "Typename_of_" ^ type_name
+    let type_name_module_name ~type_name =
+      "Typename_of_" ^ Ppx_helpers.mangle_unboxed type_name
+    ;;
 
     let with_named ~loc ~type_name ~params expr =
       let name_t =
@@ -445,7 +485,7 @@ module Typerep_implementation = struct
         @@ module_binding ~loc ~name:(Located.mk ~loc (Some name)) ~expr:type_name_module
       in
       let typename_of_t =
-        let lid = "typename_of_" ^ type_name in
+        let lid = "typename_of_" ^ Ppx_helpers.mangle_unboxed type_name in
         pstr_value
           ~loc
           Nonrecursive
@@ -475,10 +515,74 @@ module Typerep_implementation = struct
       prefix ^ Int.to_string n
     ;;
 
+    module Tuple_l = struct
+      (* element_0, element_1, etc. *)
+      let element_n_ident ~elements:list = field_or_tag_n_ident "element" ~list
+      let element_eval_n_ident ~elements:list = field_or_tag_n_ident "el" ~list
+
+      let elements ~loc ~typerep_of_type ~elements =
+        let map { Element_case.ctyp; label; index } =
+          let rep = typerep_of_type ctyp in
+          let tuple_pat =
+            Ppxlib_jane.Ast_builder.Default.ppat_tuple
+              ~loc
+              (List.mapi
+                 ~f:(fun i { Element_case.label; _ } ->
+                   label, if i = index then pvar ~loc "v" else ppat_any ~loc)
+                 elements)
+              Closed
+          in
+          let lab_as_exp =
+            match label with
+            | None -> [%expr None]
+            | Some name -> [%expr Some [%e estring ~loc name]]
+          in
+          let get = [%expr fun [%p tuple_pat] () -> v] in
+          let idx = eint ~loc index in
+          ( index
+          , label
+          , [%expr
+              Typerep_lib.Std.Typerep.Element.internal_use_only
+                { Typerep_lib.Std.Typerep.Element_internal.label = [%e lab_as_exp]
+                ; index = [%e idx]
+                ; rep = [%e rep]
+                ; tyid =
+                    Typerep_lib.Std.Typename.Tuple_l.Internal_use_only.Boxed
+                    .typename_of_index
+                      typename
+                      [%e idx]
+                ; get = [%e get]
+                }] )
+        in
+        List.map ~f:map elements
+      ;;
+
+      let create ~loc ~elements =
+        let elements_rep =
+          List.mapi elements ~f:(fun i { Element_case.label; index; _ } ->
+            assert (i = index);
+            label, evar ~loc @@ element_eval_n_ident ~elements index)
+        in
+        let tuple = Ppxlib_jane.Ast_builder.Default.pexp_tuple ~loc elements_rep in
+        let vbs =
+          List.mapi elements ~f:(fun i { index; _ } ->
+            assert (i = index);
+            let pat = pvar ~loc @@ element_eval_n_ident ~elements index in
+            let expr =
+              [%expr (get [%e evar ~loc @@ element_n_ident ~elements index]) ()]
+            in
+            value_binding ~loc ~pat ~expr)
+        in
+        [%expr
+          fun { Typerep_lib.Std.Typerep.Tuple_l_internal.get } ->
+            [%e pexp_let ~loc Nonrecursive vbs tuple]]
+      ;;
+    end
+
     module Record = struct
       let field_n_ident ~fields:list = field_or_tag_n_ident "field" ~list
 
-      let fields ~loc ~typerep_of_type ~fields =
+      let fields ~loc ~typerep_of_type ~unboxed ~fields =
         let map { Field_case.ctyp; label; index; mutable_flag; _ } =
           let rep = typerep_of_type ctyp in
           let is_mutable =
@@ -487,7 +591,9 @@ module Typerep_implementation = struct
             | Immutable -> false
           in
           let get =
-            [%expr fun t () -> [%e pexp_field ~loc [%expr t] (Located.lident ~loc label)]]
+            [%expr
+              fun t () ->
+                [%e make_field_expr ~unboxed ~loc [%expr t] (Located.lident ~loc label)]]
           in
           ( index
           , label
@@ -505,23 +611,36 @@ module Typerep_implementation = struct
       ;;
 
       let has_double_array_tag ~loc ~typerep_of_type ~fields =
-        let fields_binding =
+        (* For [type t = { x : int; y : string }], this generates code that roughly looks
+           like:
+           {[
+             match double_array_value typerep_of_int, double_array_value typerep_of_string with
+             | Some x, Some y -> Typerep_obj.has_double_array_tag { x = x (); y = y () }
+             | _ -> false
+           ]}
+        *)
+        let field_thunk_option_exprs, field_thunk_some_pats, fields_binding =
           let map { Field_case.ctyp; label; _ } =
-            (* The value must be a float else this segfaults.  This is tested by the
-               unit tests in case this property changes. *)
-            ( Located.lident ~loc label
-            , let rep = typerep_of_type ctyp in
-              [%expr Typerep_lib.Std.Typerep_obj.double_array_value [%e rep] ()] )
+            (* The value must be a float else this segfaults. This is tested by the unit
+               tests in case this property changes. *)
+            let rep = typerep_of_type ctyp in
+            let field_thunk_name = gen_symbol ~prefix:label () in
+            ( [%expr Typerep_lib.Std.Typerep_obj.double_array_value [%e rep]]
+            , [%pat? Some [%p pvar ~loc field_thunk_name]]
+            , (Located.lident ~loc label, [%expr [%e evar ~loc field_thunk_name] ()]) )
           in
-          List.map ~f:map fields
+          List.unzip3 (List.map ~f:map fields)
         in
         [%expr
           Typerep_lib.For_ppx.Portable_lazy.from_fun (fun () ->
-            Typerep_lib.Std.Typerep_obj.has_double_array_tag
-              [%e pexp_record ~loc fields_binding None])]
+            match [%e pexp_tuple ~loc field_thunk_option_exprs] with
+            | [%p ppat_tuple ~loc field_thunk_some_pats] ->
+              Typerep_lib.Std.Typerep_obj.has_double_array_tag
+                [%e pexp_record ~loc fields_binding None]
+            | _ -> false)]
       ;;
 
-      let create ~loc ~fields =
+      let create ~loc ~unboxed ~fields =
         let record =
           (* Calling [get] on the fields from left to right matters, so that iteration
              goes left to right too. *)
@@ -531,7 +650,11 @@ module Typerep_implementation = struct
             in
             List.map ~f:map fields
           in
-          let record = pexp_record ~loc fields_binding None in
+          let record =
+            [%expr
+              let record = [%e make_record_expr ~unboxed ~loc fields_binding None] in
+              fun () -> record]
+          in
           let vbs =
             List.mapi fields ~f:(fun i { Field_case.index; label; _ } ->
               assert (i = index);
@@ -688,6 +811,213 @@ module Typerep_implementation = struct
     end
   end
 
+  let typerep_of_labeled_tuple loc ~typerep_of_type ~recur tuple =
+    let typerep_of_type ty = typerep_of_type ty ~recur in
+    let elements =
+      List.mapi ~f:(fun index (label, ctyp) -> { Element_case.index; label; ctyp }) tuple
+    in
+    let element_ident i = Util.Tuple_l.element_n_ident ~elements i in
+    let indexed_elements = Util.Tuple_l.elements ~loc ~typerep_of_type ~elements in
+    let elements_iarray =
+      let elements =
+        List.map
+          ~f:(fun (index, _, _) ->
+            [%expr
+              Typerep_lib.Std.Typerep.Tuple_l_internal.Element
+                [%e evar ~loc @@ element_ident index]])
+          indexed_elements
+      in
+      [%expr
+        Typerep_lib.For_ppx.Iarray.unsafe_of_array__promise_no_mutation
+          [%e pexp_array ~loc elements]]
+    in
+    let typename =
+      let elements =
+        List.map elements ~f:(fun { label; ctyp; _ } ->
+          let label =
+            match label with
+            | None -> [%expr None]
+            | Some label -> [%expr Some [%e estring ~loc label]]
+          in
+          [%expr
+            T ([%e label], Typerep_lib.Std.Typerep.typename_of_t [%e typerep_of_type ctyp])])
+      in
+      [%expr
+        Typerep_lib.Std.Typename.Tuple_l.Internal_use_only.Boxed.typename_of_t
+          [%e elist ~loc elements]]
+    in
+    let bindings =
+      [ "elements", elements_iarray; "create", Util.Tuple_l.create ~loc ~elements ]
+    in
+    let elements_binding =
+      let map (name, _) =
+        ( Located.lident ~loc ("Typerep_lib.Std.Typerep.Tuple_l_internal." ^ name)
+        , evar ~loc name )
+      in
+      List.map ~f:map (("typename", typename) :: bindings)
+    in
+    let tuple =
+      let elements =
+        [%expr
+          Typerep_lib.Std.Typerep.Tuple_l.internal_use_only
+            [%e pexp_record ~loc elements_binding None]]
+      in
+      [%expr Typerep_lib.Std.Typerep.Tuple_l [%e elements]]
+    in
+    let tuple = Gen.let_in loc bindings tuple in
+    let tuple =
+      List.fold_right
+        indexed_elements
+        ~f:(fun (index, _, expr) acc ->
+          [%expr
+            let [%p pvar ~loc @@ element_ident index] = [%e expr] in
+            [%e acc]])
+        ~init:tuple
+    in
+    let tuple =
+      [%expr
+        let typename = [%e typename] in
+        [%e tuple]]
+    in
+    tuple
+  ;;
+
+  let typerep_of_labeled_tuple_u loc ~typerep_of_type ~recur tuple =
+    let typerep_of_type ty = typerep_of_type ty ~recur in
+    let arity = List.length tuple in
+    if arity < 2 || arity > 5
+    then
+      Location.raise_errorf
+        ~loc
+        "ppx_typerep: labeled unboxed tuples of arity %d are not supported (only 2-5)"
+        arity;
+    let elements =
+      List.mapi ~f:(fun index (label, ctyp) -> Element_case.{ index; label; ctyp }) tuple
+    in
+    (* Create element_info array *)
+    let elements_array =
+      let elements =
+        List.map
+          ~f:(fun Element_case.{ label; index; _ } ->
+            [%expr
+              { Typerep_lib.Std.Typerep.Tuple_l_u_internal.label =
+                  [%e
+                    match label with
+                    | None -> [%expr None]
+                    | Some name -> [%expr Some [%e estring ~loc name]]]
+              ; index = [%e eint ~loc index]
+              }])
+          elements
+      in
+      [%expr
+        Typerep_lib.For_ppx.Iarray.unsafe_of_array__promise_no_mutation
+          [%e pexp_array ~loc elements]]
+    in
+    (* Generate pattern with underscores for unused variables *)
+    let make_tuple_pat_for_getter labels target_index =
+      Ppxlib_jane.Ast_builder.Default.ppat_unboxed_tuple
+        ~loc
+        (List.mapi
+           ~f:(fun i label ->
+             let var_name =
+               if i = target_index then "v" ^ Int.to_string i else "_v" ^ Int.to_string i
+             in
+             label, pvar ~loc var_name)
+           labels)
+        Closed
+    in
+    let labels = List.map ~f:(fun s -> s.Element_case.label) elements in
+    let typereps = List.map ~f:(fun s -> typerep_of_type s.Element_case.ctyp) elements in
+    let typename =
+      let elements =
+        List.map elements ~f:(fun { label; ctyp; _ } ->
+          let label =
+            match label with
+            | None -> [%expr None]
+            | Some label -> [%expr Some [%e estring ~loc label]]
+          in
+          [%expr
+            Typerep_lib.Std.Typename.Tuple_l.Internal_use_only.Unboxed.Element.T
+              ([%e label], Typerep_lib.Std.Typerep.typename_of_t [%e typerep_of_type ctyp])])
+      in
+      let arg = pexp_tuple ~loc elements in
+      let elements =
+        match arity with
+        | 2 ->
+          [%expr Typerep_lib.Std.Typename.Tuple_l.Internal_use_only.Unboxed.T2 [%e arg]]
+        | 3 ->
+          [%expr Typerep_lib.Std.Typename.Tuple_l.Internal_use_only.Unboxed.T3 [%e arg]]
+        | 4 ->
+          [%expr Typerep_lib.Std.Typename.Tuple_l.Internal_use_only.Unboxed.T4 [%e arg]]
+        | 5 ->
+          [%expr Typerep_lib.Std.Typename.Tuple_l.Internal_use_only.Unboxed.T5 [%e arg]]
+        | _ -> assert false (* Already checked above *)
+      in
+      [%expr
+        Typerep_lib.Std.Typename.Tuple_l.Internal_use_only.Unboxed.typename_of_t
+          [%e elements]]
+    in
+    let constructor =
+      match typereps with
+      | [ t1; t2 ] ->
+        [%expr
+          Typerep_lib.Std.Typerep.Tuple_l_u_internal.T2
+            { fields = [%e elements_array]
+            ; t1 = [%e t1]
+            ; t2 = [%e t2]
+            ; get1 = (fun [%p make_tuple_pat_for_getter labels 0] -> v0)
+            ; get2 = (fun [%p make_tuple_pat_for_getter labels 1] -> v1)
+            ; typename = [%e typename]
+            }]
+      | [ t1; t2; t3 ] ->
+        [%expr
+          Typerep_lib.Std.Typerep.Tuple_l_u_internal.T3
+            { fields = [%e elements_array]
+            ; t1 = [%e t1]
+            ; t2 = [%e t2]
+            ; t3 = [%e t3]
+            ; get1 = (fun [%p make_tuple_pat_for_getter labels 0] -> v0)
+            ; get2 = (fun [%p make_tuple_pat_for_getter labels 1] -> v1)
+            ; get3 = (fun [%p make_tuple_pat_for_getter labels 2] -> v2)
+            ; typename = [%e typename]
+            }]
+      | [ t1; t2; t3; t4 ] ->
+        [%expr
+          Typerep_lib.Std.Typerep.Tuple_l_u_internal.T4
+            { fields = [%e elements_array]
+            ; t1 = [%e t1]
+            ; t2 = [%e t2]
+            ; t3 = [%e t3]
+            ; t4 = [%e t4]
+            ; get1 = (fun [%p make_tuple_pat_for_getter labels 0] -> v0)
+            ; get2 = (fun [%p make_tuple_pat_for_getter labels 1] -> v1)
+            ; get3 = (fun [%p make_tuple_pat_for_getter labels 2] -> v2)
+            ; get4 = (fun [%p make_tuple_pat_for_getter labels 3] -> v3)
+            ; typename = [%e typename]
+            }]
+      | [ t1; t2; t3; t4; t5 ] ->
+        [%expr
+          Typerep_lib.Std.Typerep.Tuple_l_u_internal.T5
+            { fields = [%e elements_array]
+            ; t1 = [%e t1]
+            ; t2 = [%e t2]
+            ; t3 = [%e t3]
+            ; t4 = [%e t4]
+            ; t5 = [%e t5]
+            ; get1 = (fun [%p make_tuple_pat_for_getter labels 0] -> v0)
+            ; get2 = (fun [%p make_tuple_pat_for_getter labels 1] -> v1)
+            ; get3 = (fun [%p make_tuple_pat_for_getter labels 2] -> v2)
+            ; get4 = (fun [%p make_tuple_pat_for_getter labels 3] -> v3)
+            ; get5 = (fun [%p make_tuple_pat_for_getter labels 4] -> v4)
+            ; typename = [%e typename]
+            }]
+      | _ -> assert false (* Already checked above *)
+    in
+    [%expr
+      Typerep_lib.Std.Typerep.Tuple_l_u
+        (Typerep_lib.Std.Typerep.Tuple_l_u.internal_use_only [%e constructor])]
+  ;;
+
   let rec typerep_of_type ty ~recur =
     let loc = { ty.ptyp_loc with loc_ghost = true } in
     match Ppxlib_jane.Shim.Core_type_desc.of_parsetree ty.ptyp_desc with
@@ -700,7 +1030,9 @@ module Typerep_implementation = struct
       let make_expr =
         match recursive with
         | Some make -> make
-        | None -> type_constr_conv ~loc id ~f:(fun tn -> "typerep_of_" ^ tn)
+        | None ->
+          type_constr_conv ~loc id ~f:(fun tn ->
+            "typerep_of_" ^ Ppx_helpers.mangle_unboxed tn)
       in
       make_expr (List.map params ~f:(typerep_of_type ~recur))
     | Ptyp_var (name, jkind) -> evar ~loc @@ Util.arg_of_param ({ txt = name; loc }, jkind)
@@ -709,12 +1041,11 @@ module Typerep_implementation = struct
     | Ptyp_tuple labeled_typs ->
       (match Ppxlib_jane.as_unlabeled_tuple labeled_typs with
        | Some typs -> typerep_of_tuple loc typs ~recur
-       | None -> Location.raise_errorf ~loc "ppx_typerep: labeled tuples unsupported")
+       | None -> typerep_of_labeled_tuple loc ~typerep_of_type ~recur labeled_typs)
     | Ptyp_unboxed_tuple labeled_typs ->
       (match Ppxlib_jane.as_unlabeled_tuple labeled_typs with
        | Some typs -> typerep_of_tuple_u loc typs ~recur
-       | None ->
-         Location.raise_errorf ~loc "ppx_typerep: labeled unboxed tuples unsupported")
+       | None -> typerep_of_labeled_tuple_u loc ~typerep_of_type ~recur labeled_typs)
     | _ -> Location.raise_errorf ~loc "ppx_typerep: unknown type"
 
   and typerep_of_tuple loc tuple ~recur =
@@ -745,11 +1076,11 @@ module Typerep_implementation = struct
     in
     eapply ~loc typerep_of_tuple_u typereps
 
-  and typerep_of_record loc ~recur ~type_name lds =
+  and typerep_of_record loc ~recur ~type_name ~unboxed lds =
     let typerep_of_type = typerep_of_type ~recur in
     let fields = Branches.fields lds in
     let field_ident i = Util.Record.field_n_ident ~fields i in
-    let indexed_fields = Util.Record.fields ~loc ~typerep_of_type ~fields in
+    let indexed_fields = Util.Record.fields ~loc ~typerep_of_type ~unboxed ~fields in
     let fields_iarray =
       let fields =
         List.map
@@ -766,9 +1097,11 @@ module Typerep_implementation = struct
     let bindings =
       [ "typename", Util.typename_field ~loc ~type_name:(Some type_name)
       ; ( "has_double_array_tag"
-        , Util.Record.has_double_array_tag ~loc ~typerep_of_type ~fields )
+        , if unboxed
+          then [%expr Typerep_lib.For_ppx.Portable_lazy.from_val false]
+          else Util.Record.has_double_array_tag ~loc ~typerep_of_type ~fields )
       ; "fields", fields_iarray
-      ; "create", Util.Record.create ~loc ~fields
+      ; "create", Util.Record.create ~loc ~unboxed ~fields
       ]
     in
     let fields_binding =
@@ -784,7 +1117,9 @@ module Typerep_implementation = struct
           Typerep_lib.Std.Typerep.Record.internal_use_only
             [%e pexp_record ~loc fields_binding None]]
       in
-      [%expr Typerep_lib.Std.Typerep.Record [%e fields]]
+      if unboxed
+      then [%expr Typerep_lib.Std.Typerep.Record_u [%e fields]]
+      else [%expr Typerep_lib.Std.Typerep.Record [%e fields]]
     in
     let record = Gen.let_in loc bindings record in
     let record =
@@ -872,11 +1207,9 @@ module Typerep_implementation = struct
           ~recur
           ~type_name:(Some type_name)
           (Branches.constructors cds)
-      | Ptype_record lds -> typerep_of_record loc ~recur ~type_name lds
-      | Ptype_record_unboxed_product _ ->
-        Location.raise_errorf
-          ~loc
-          "ppx_typerep_conv: unboxed record types are not supported"
+      | Ptype_record lds -> typerep_of_record loc ~recur ~type_name ~unboxed:false lds
+      | Ptype_record_unboxed_product lds ->
+        typerep_of_record loc ~recur ~type_name ~unboxed:true lds
       | Ptype_open ->
         Location.raise_errorf ~loc "ppx_typerep_conv: open types are not supported"
       | Ptype_abstract ->
@@ -919,7 +1252,7 @@ module Typerep_implementation = struct
           jkind
           acc)
     in
-    let value_name = "typerep_of_" ^ type_name in
+    let value_name = "typerep_of_" ^ Ppx_helpers.mangle_unboxed type_name in
     let core_type = Util.typerep_of_t td ~params in
     let prelude =
       Util.type_name_module_definition ~loc ~path ~type_name ~params ~typename_functor
@@ -961,7 +1294,7 @@ module Typerep_implementation = struct
       let map =
         List.map tds ~f:(fun td ->
           let type_name = td.ptype_name.txt in
-          type_name, gen_symbol ~prefix:type_name ())
+          type_name, gen_symbol ~prefix:(Ppx_helpers.mangle_unboxed type_name) ())
         |> Map.of_alist_exn (module String)
       in
       fun ~type_name -> Map.find_exn map type_name
@@ -1065,16 +1398,18 @@ module Typerep_implementation = struct
 
   let gen =
     Deriving.Generator.make
-      Deriving.Args.(empty +> flag "abstract" +> arg "named" Ast_pattern.(ebool __))
-      (fun ~loc ~path x abstract named ->
+      Deriving.Args.(
+        empty +> flag "abstract" +> arg "named" Ast_pattern.(ebool __) +> flag "unboxed")
+      (fun ~loc ~path (rf, tds) abstract named unboxed ->
         let named = Option.value ~default:true named in
+        let tds = Ppx_helpers.with_implicit_unboxed_records ~loc ~unboxed tds in
         match named, abstract with
         | false, true ->
           Location.raise_errorf
             ~loc
             "ppx_typerep_conv: [~named:false] and [~abstract] are not supported together"
-        | true, true -> with_typerep_abstract ~loc ~path x
-        | named, false -> with_typerep ~loc ~path ~named x)
+        | true, true -> with_typerep_abstract ~loc ~path (rf, tds)
+        | named, false -> with_typerep ~loc ~path ~named (rf, tds))
   ;;
 
   let typerep_of_extension ~loc:_ ~path:_ ctyp = typerep_of_type ctyp

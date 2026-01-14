@@ -88,3 +88,18 @@ types, and prevents the use of custom `Type_generic` implementations based on na
 deriver relies on versions of `Typerep_lib.Typename.Make` templated over jkinds. To
 support novel combinations of jkinds, the templates in `typerep_lib` will need to be
 updated.
+
+### Implicit unboxed records
+
+Use the `~unboxed` flag to also derive `typerep_of` and `typename_of` for implicit unboxed
+records. For example:
+```ocaml
+(* This: *)
+type t = { x : Int64_u.t; y : Int64_u.t } [@@deriving typerep ~unboxed]
+
+(* will generate this: *)
+val typerep_of_t : t Typerep_lib.Std.Typerep.t @@ portable
+val typename_of_t : t Typerep_lib.Std.Typename.t @@ portable
+val typerep_of_t_u : t# Typerep_lib.Std.Typerep.t @@ portable
+val typename_of_t_u : t# Typerep_lib.Std.Typename.t @@ portable
+```
