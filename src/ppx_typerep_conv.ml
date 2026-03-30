@@ -258,7 +258,7 @@ module Typerep_signature = struct
       Deriving.Args.(empty +> arg "named" Ast_pattern.(ebool __) +> flag "unboxed")
       (fun ~loc ~path (rf, tds) named unboxed ->
         let named = Option.value ~default:true named in
-        let tds = Ppx_helpers.with_implicit_unboxed_records ~loc ~unboxed tds in
+        let tds = Ppx_helpers.with_implicit_unboxed_types ~loc ~unboxed tds in
         sig_generator ~loc ~path ~polymorphic:(not named) (rf, tds))
   ;;
 end
@@ -429,9 +429,10 @@ module Typerep_implementation = struct
             ~sep:"__"
             (("Typerep_lib.Typename.Make" ^ arity_string)
              :: List.map params ~f:(function
-               | _, Some { pjkind_desc = Pjk_abbreviation kind; _ } -> kind
+               | _, Some { pjka_desc = Pjk_abbreviation { txt = Lident kind; _ }; _ } ->
+                 kind
                | _, None -> "value"
-               | _, Some { pjkind_loc = loc; _ } ->
+               | _, Some { pjka_loc = loc; _ } ->
                  Location.raise_errorf
                    ~loc
                    "ppx_typerep: don't know how to mangle this kind compatibly with \
@@ -1402,7 +1403,7 @@ module Typerep_implementation = struct
         empty +> flag "abstract" +> arg "named" Ast_pattern.(ebool __) +> flag "unboxed")
       (fun ~loc ~path (rf, tds) abstract named unboxed ->
         let named = Option.value ~default:true named in
-        let tds = Ppx_helpers.with_implicit_unboxed_records ~loc ~unboxed tds in
+        let tds = Ppx_helpers.with_implicit_unboxed_types ~loc ~unboxed tds in
         match named, abstract with
         | false, true ->
           Location.raise_errorf
