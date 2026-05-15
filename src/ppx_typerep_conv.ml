@@ -429,8 +429,9 @@ module Typerep_implementation = struct
             ~sep:"__"
             (("Typerep_lib.Typename.Make" ^ arity_string)
              :: List.map params ~f:(function
-               | _, Some { pjka_desc = Pjk_abbreviation { txt = Lident kind; _ }; _ } ->
-                 kind
+               | ( _
+                 , Some { pjka_desc = Pjk_abbreviation ({ txt = Lident kind; _ }, []); _ }
+                 ) -> kind
                | _, None -> "value"
                | _, Some { pjka_loc = loc; _ } ->
                  Location.raise_errorf
