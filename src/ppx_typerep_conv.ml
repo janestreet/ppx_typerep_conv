@@ -283,7 +283,7 @@ module Typerep_implementation = struct
     val parse_params
       :  ptype_params:(core_type * (variance * injectivity)) list
       -> named:bool
-      -> param list * string
+      -> param list * (string, Ppx_template_expander.Syntax_error.t) result
 
     val params_patts : loc:Location.t -> params:param list -> pattern list
 
@@ -292,7 +292,7 @@ module Typerep_implementation = struct
       -> path:string
       -> type_name:string
       -> params:param list
-      -> typename_functor:string
+      -> typename_functor:(string, Ppx_template_expander.Syntax_error.t) result
       -> structure
 
     val with_named
@@ -421,23 +421,32 @@ module Typerep_implementation = struct
       let arity_string = Int.to_string (List.length params) in
       if named
       then (
-        let typename_functor = "Typerep_lib.Std.Make_typename.Make" ^ arity_string in
+        let typename_functor = Ok ("Typerep_lib.Std.Make_typename.Make" ^ arity_string) in
         remove_jkinds params, typename_functor)
       else (
         let typename_functor =
-          String.concat
-            ~sep:"__"
-            (("Typerep_lib.Typename.Make" ^ arity_string)
-             :: List.map params ~f:(function
-               | ( _
-                 , Some { pjka_desc = Pjk_abbreviation ({ txt = Lident kind; _ }, []); _ }
-                 ) -> kind
-               | _, None -> "value"
-               | _, Some { pjka_loc = loc; _ } ->
-                 Location.raise_errorf
-                   ~loc
-                   "ppx_typerep: don't know how to mangle this kind compatibly with \
-                    ppx_template"))
+          let kinds =
+            params
+            |> List.map ~f:(function
+              | _, Some jkind -> jkind
+              | { loc; txt = _ }, None ->
+                { Ppxlib_jane.pjka_desc =
+                    Pjk_abbreviation (Located.lident ~loc "value", [])
+                ; pjka_loc = loc
+                })
+          in
+          match
+            (Ppx_template_expander.Mangle.suffix_for_manual_mangling
+            [@alert "-for_specific_ppx_uses"])
+              ~kinds:(Explicit, kinds)
+              ()
+          with
+          | Error error -> Error error
+          | Ok jkind_suffix ->
+            Ok
+              (String.concat
+                 ~sep:""
+                 [ "Typerep_lib.Typename.Make"; arity_string; jkind_suffix ])
         in
         params, typename_functor)
     ;;
@@ -479,7 +488,14 @@ module Typerep_implementation = struct
 
     let type_name_module_definition ~loc ~path ~type_name ~params ~typename_functor =
       let name = type_name_module_name ~type_name in
-      let make = pmod_ident ~loc @@ Located.lident ~loc @@ typename_functor in
+      let make =
+        match typename_functor with
+        | Ok typename_functor ->
+          pmod_ident ~loc @@ Located.lident ~loc @@ typename_functor
+        | Error syntax_error ->
+          pmod_extension ~loc
+          @@ Ppx_template_expander.Syntax_error.to_extension syntax_error
+      in
       let type_name_struct = str_item_type_and_name ~loc ~path ~params ~type_name in
       let type_name_module = pmod_apply ~loc make type_name_struct in
       let module_def =
@@ -770,42 +786,46 @@ module Typerep_implementation = struct
           let arg_tuple i = "v" ^ Int.to_string i in
           let mapi index' ({ Variant_case.arity; index; args; _ } as variant) =
             if index <> index' then assert false;
-            let patt, value =
-              if arity = 0
-              then Variant_case.patt ~loc variant None, [%expr value_tuple0]
-              else (
-                let patt =
-                  let f i = pvar ~loc @@ arg_tuple i in
-                  let args =
-                    match args with
-                    | Tupled _ -> ppat_tuple ~loc (List.init arity ~f)
-                    | Inline_record args ->
-                      ppat_record
-                        ~loc
-                        (List.mapi args ~f:(fun i (label, _) ->
-                           Located.lident ~loc label, f i))
-                        Closed
-                  in
-                  Variant_case.patt ~loc variant (Some args)
-                in
-                let expr =
-                  let ctys = Variant_case.Args.ctys args in
-                  if arity = 1
-                  then evar ~loc @@ arg_tuple 0
-                  else
-                    Ppxlib_jane.Ast_builder.Default.pexp_unboxed_tuple
+            if arity = 0
+            then (
+              let lhs = Variant_case.patt ~loc variant None in
+              let tag = evar ~loc @@ tag_n_ident ~variants index in
+              let rhs =
+                [%expr
+                  Typerep_lib.Std.Typerep.Variant_internal.Value ([%e tag], value_tuple0)]
+              in
+              case ~guard:None ~lhs ~rhs)
+            else (
+              let patt =
+                let f i = pvar ~loc @@ arg_tuple i in
+                let args =
+                  match args with
+                  | Tupled _ -> ppat_tuple ~loc (List.init arity ~f)
+                  | Inline_record args ->
+                    ppat_record
                       ~loc
-                      (List.mapi ctys ~f:(fun i _ -> None, evar ~loc @@ arg_tuple i))
+                      (List.mapi args ~f:(fun i (label, _) ->
+                         Located.lident ~loc label, f i))
+                      Closed
                 in
-                patt, expr)
-            in
-            let tag = evar ~loc @@ tag_n_ident ~variants index in
-            let prod =
-              [%expr
-                Typerep_lib.Std.Typerep.Variant_internal.Value
-                  ([%e tag], fun () -> [%e value])]
-            in
-            case ~guard:None ~lhs:patt ~rhs:prod
+                Variant_case.patt ~loc variant (Some args)
+              in
+              let value =
+                let ctys = Variant_case.Args.ctys args in
+                if arity = 1
+                then evar ~loc @@ arg_tuple 0
+                else
+                  Ppxlib_jane.Ast_builder.Default.pexp_unboxed_tuple
+                    ~loc
+                    (List.mapi ctys ~f:(fun i _ -> None, evar ~loc @@ arg_tuple i))
+              in
+              let tag = evar ~loc @@ tag_n_ident ~variants index in
+              let prod =
+                [%expr
+                  Typerep_lib.Std.Typerep.Variant_internal.Value
+                    ([%e tag], fun () -> [%e value])]
+              in
+              case ~guard:None ~lhs:patt ~rhs:prod)
           in
           List.mapi ~f:mapi variants
         in

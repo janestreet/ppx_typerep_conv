@@ -3,6 +3,7 @@
  (public_name ppx_typerep_conv)
  (kind ppx_rewriter)
  (ppx_runtime_libraries typerep)
- (libraries base compiler-libs.common ppx_helpers ppxlib ppxlib_jane)
+ (libraries base compiler-libs.common ppx_helpers ppx_template.expander
+   ppxlib ppxlib_jane)
  (preprocess
-  (pps ppxlib.metaquot)))
+  (pps ppxlib.metaquot ppx_let)))
