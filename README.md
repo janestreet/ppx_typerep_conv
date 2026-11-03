@@ -1,5 +1,4 @@
-ppx_typerep_conv
-================
+# ppx_typerep_conv
 
 Automatic generation of runtime types from type definitions.
 
@@ -73,6 +72,11 @@ Error: In this `with' constraint, the new definition of t
 
 To workaround that error, simply copy the constraint on the type which has the
 `[@@deriving]` annotation. This will force generating a list of value bindings.
+
+## The `~abstract` Parameter
+
+Use `[@@deriving typerep ~abstract]` to generate an opaque typerep without inspecting the
+underlying representation.
 
 ## The `~named` Parameter
 
